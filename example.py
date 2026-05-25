@@ -5,6 +5,9 @@
 #   - @schedule(every=N) — run periodically every N seconds
 #   - upstream — the triggering attestation payload (dict or None)
 #   - attest() — create downstream attestations
+#   - pause_schedule(id) — pause a Pulse schedule
+#   - resume_schedule(id) — resume a paused schedule
+#   - delete_schedule(id) — soft-delete a schedule
 
 @watch('data:incoming', context='my/ctx')
 def process(upstream):

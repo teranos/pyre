@@ -9,6 +9,8 @@ pub struct PluginConfig {
     pub ats_store_endpoint: String,
     /// Queue service gRPC endpoint
     pub queue_endpoint: String,
+    /// Schedule service gRPC endpoint
+    pub schedule_endpoint: String,
     /// Auth token for service calls
     pub auth_token: String,
     /// Custom configuration values

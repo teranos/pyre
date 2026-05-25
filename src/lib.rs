@@ -19,6 +19,7 @@ pub mod engine;
 pub mod execution;
 mod handlers;
 pub mod proto;
+pub mod schedulestore;
 pub mod service;
 
 pub use config::PluginConfig;

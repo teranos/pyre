@@ -135,6 +135,10 @@ impl PythonEngine {
                     .map_err(|e| Error::context("failed to inject attest function", e))?;
             }
 
+            // Inject schedule management functions if schedule client is available
+            crate::schedulestore::inject_schedule_functions(py, &globals)
+                .map_err(|e| Error::context("failed to inject schedule functions", e))?;
+
             // Inject upstream attestation as Python dict (or None)
             match upstream_attestation {
                 Some(attestation) => {

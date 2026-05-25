@@ -53,6 +53,7 @@ impl PythonPluginService {
                 .map(|s| s.to_string())
                 .collect(),
             ats_client: atsstore::new_shared_client(),
+            schedule_client: crate::schedulestore::new_shared_client(),
             discovered_handlers: HashMap::new(),
         }));
 
@@ -233,6 +234,7 @@ impl DomainPluginService for PythonPluginService {
             state.config = Some(PluginConfig {
                 ats_store_endpoint: req.ats_store_endpoint.clone(),
                 queue_endpoint: req.queue_endpoint,
+                schedule_endpoint: req.schedule_endpoint.clone(),
                 auth_token: req.auth_token.clone(),
                 config: req.config,
             });
@@ -244,6 +246,18 @@ impl DomainPluginService for PythonPluginService {
                     &state.ats_client,
                     atsstore::AtsStoreConfig {
                         endpoint: req.ats_store_endpoint,
+                        auth_token: req.auth_token.clone(),
+                    },
+                );
+            }
+
+            // Initialize Schedule client if endpoint is provided
+            if !req.schedule_endpoint.is_empty() {
+                debug!("Initializing Schedule client for Python schedule management");
+                crate::schedulestore::init_shared_client(
+                    &state.schedule_client,
+                    crate::schedulestore::ScheduleConfig {
+                        endpoint: req.schedule_endpoint,
                         auth_token: req.auth_token,
                     },
                 );
@@ -766,12 +780,15 @@ impl PythonPluginService {
 
         let result = {
             let state = self.handlers.state.read();
-            state.engine.execute_with_ats(
+            crate::schedulestore::set_current_client(state.schedule_client.clone());
+            let r = state.engine.execute_with_ats(
                 &exec_code,
                 &config,
                 Some(state.ats_client.clone()),
                 upstream.as_ref(),
-            )
+            );
+            crate::schedulestore::clear_current_client();
+            r
         };
 
         // Convert execution result to ExecuteJobResponse

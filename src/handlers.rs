@@ -3,6 +3,7 @@
 //! Implements handlers for /execute, /evaluate, /pip/*, /version, /modules endpoints.
 
 use crate::atsstore::SharedAtsStoreClient;
+use crate::schedulestore::SharedScheduleClient;
 use crate::engine::{ExecutionConfig, ExecutionResult, PythonEngine};
 use crate::proto::{HttpHeader, HttpResponse};
 use parking_lot::RwLock;
@@ -25,6 +26,8 @@ pub(crate) struct PluginState {
     pub default_modules: Vec<String>,
     /// ATSStore client for attestation creation from Python
     pub ats_client: SharedAtsStoreClient,
+    /// Schedule client for pause/resume/delete from Python
+    pub schedule_client: SharedScheduleClient,
     /// Dynamically discovered handlers: handler_name -> Python code
     pub discovered_handlers: HashMap<String, String>,
 }
