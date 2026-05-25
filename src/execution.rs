@@ -275,6 +275,7 @@ impl PythonEngine {
     /// Returns empty vec if no decorators found or on error.
     pub fn extract_watchers(&self, code: &str) -> Vec<WatcherInfo> {
         // Python preamble: define @watch decorator that records metadata
+        // Also stub @schedule so scripts using both don't crash
         let preamble = r#"
 _qntx_watchers = []
 
@@ -290,6 +291,10 @@ class watch:
                 'context': self._context,
             })
         return fn
+
+class schedule:
+    def __init__(self, every, description=None): pass
+    def __call__(self, fn): return fn
 "#;
 
         let full_code = format!("{}\n{}", preamble, code);
@@ -338,6 +343,76 @@ class watch:
                     handler_fn: handler_fn.to_string(),
                     predicates: vec![predicate.to_string()],
                     contexts: vec![context.to_string()],
+                })
+            })
+            .collect()
+    }
+
+    /// Extract @schedule decorator metadata from a handler script.
+    ///
+    /// Same pattern as extract_watchers: injects a `schedule` decorator,
+    /// executes the script, collects metadata.
+    pub fn extract_schedules(&self, code: &str) -> Vec<crate::engine::ScheduleMetadata> {
+        // Also stub @watch so scripts using both don't crash
+        let preamble = r#"
+_qntx_schedules = []
+
+class schedule:
+    def __init__(self, every, description=None):
+        self._every = every
+        self._description = description
+    def __call__(self, fn):
+        if self._every and self._every > 0:
+            _qntx_schedules.append({
+                'handler_fn': fn.__name__,
+                'every': self._every,
+                'description': self._description or fn.__doc__ or '',
+            })
+        return fn
+
+class watch:
+    def __init__(self, predicate, context=None): pass
+    def __call__(self, fn): return fn
+"#;
+
+        let extract_code = format!(
+            "{}\n{}\nimport json\n_result = json.dumps(_qntx_schedules)",
+            preamble, code
+        );
+        let result = self.execute(&extract_code, &ExecutionConfig::default());
+        if !result.success {
+            return vec![];
+        }
+
+        let json_val = match result.result {
+            Some(serde_json::Value::String(ref s)) => {
+                serde_json::from_str::<Vec<serde_json::Value>>(s).ok()
+            }
+            _ => None,
+        };
+
+        let entries = match json_val {
+            Some(v) => v,
+            None => return vec![],
+        };
+
+        entries
+            .iter()
+            .filter_map(|entry| {
+                let handler_fn = entry.get("handler_fn")?.as_str()?;
+                let every = entry.get("every")?.as_i64()?;
+                if every <= 0 {
+                    return None;
+                }
+                let description = entry
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Some(crate::engine::ScheduleMetadata {
+                    handler_fn: handler_fn.to_string(),
+                    interval_seconds: every as i32,
+                    description,
                 })
             })
             .collect()
@@ -590,5 +665,83 @@ def handle(upstream):
 
         let watchers = engine.extract_watchers(code);
         assert!(watchers.is_empty());
+    }
+
+    #[test]
+    fn test_extract_schedules_single() {
+        let engine = PythonEngine::new().unwrap();
+
+        let code = r#"
+@schedule(every=300)
+def check_status():
+    pass
+"#;
+
+        let schedules = engine.extract_schedules(code);
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(schedules[0].handler_fn, "check_status");
+        assert_eq!(schedules[0].interval_seconds, 300);
+    }
+
+    #[test]
+    fn test_extract_schedules_with_description() {
+        let engine = PythonEngine::new().unwrap();
+
+        let code = r#"
+@schedule(every=60, description='Poll upstream data')
+def poll():
+    pass
+"#;
+
+        let schedules = engine.extract_schedules(code);
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(schedules[0].handler_fn, "poll");
+        assert_eq!(schedules[0].interval_seconds, 60);
+        assert_eq!(schedules[0].description, "Poll upstream data");
+    }
+
+    #[test]
+    fn test_extract_schedules_none() {
+        let engine = PythonEngine::new().unwrap();
+
+        let code = "x = 42\ndef helper(): pass\n";
+        let schedules = engine.extract_schedules(code);
+        assert!(schedules.is_empty());
+    }
+
+    #[test]
+    fn test_extract_schedules_zero_interval() {
+        let engine = PythonEngine::new().unwrap();
+
+        let code = r#"
+@schedule(every=0)
+def noop():
+    pass
+"#;
+
+        let schedules = engine.extract_schedules(code);
+        assert!(schedules.is_empty());
+    }
+
+    #[test]
+    fn test_extract_schedules_with_watch() {
+        let engine = PythonEngine::new().unwrap();
+
+        let code = r#"
+@watch('data:new', context='test/ctx')
+def on_data(upstream):
+    pass
+
+@schedule(every=120)
+def periodic():
+    pass
+"#;
+
+        let watchers = engine.extract_watchers(code);
+        let schedules = engine.extract_schedules(code);
+        assert_eq!(watchers.len(), 1);
+        assert_eq!(schedules.len(), 1);
+        assert_eq!(watchers[0].handler_fn, "on_data");
+        assert_eq!(schedules[0].handler_fn, "periodic");
     }
 }

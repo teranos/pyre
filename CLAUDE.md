@@ -6,6 +6,6 @@ Git deps on teranos/QNTX: `qntx-grpc` (proto types), `qntx-proto` (Struct/JSON h
 
 Single binary, multiple instances via Nix wrapping (`--name`, `withPackages`).
 
-Handler discovery: queries ATS for `predicate=handler, context={name}`, keeps newest on duplicate subjects. `@watch('pred', context='ctx')` registers watchers at init.
+Handler discovery: queries ATS for `predicate=handler, context={name}`, keeps newest on duplicate subjects. `@watch('pred', context='ctx')` registers watchers at init. `@schedule(every=N)` registers periodic execution via Pulse.
 
 Version in `Cargo.toml` — bump on every code change.

@@ -24,6 +24,17 @@ pub struct WatcherInfo {
     pub contexts: Vec<String>,
 }
 
+/// Schedule metadata extracted from a @schedule-decorated handler function
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScheduleMetadata {
+    /// Function name to invoke on each tick
+    pub handler_fn: String,
+    /// Interval in seconds between invocations
+    pub interval_seconds: i32,
+    /// Human-readable description (from docstring or kwarg)
+    pub description: String,
+}
+
 /// Result of Python code execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecutionResult {

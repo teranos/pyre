@@ -1,7 +1,7 @@
 .PHONY: build install clean test check
 
 PREFIX ?= $(HOME)/.qntx
-PLUGIN_NAME := python
+PLUGIN_NAME := pyre
 BINARY_NAME := pyre
 
 build: ## Build pyre via Nix

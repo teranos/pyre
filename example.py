@@ -1,33 +1,33 @@
-# Example QNTX Python handler script
-#
-# Register with: ./attest.fish example.py
-# Runtime: qntx-python-plugin (PyO3)
+# Example Pyre handler script
 #
 # The runtime provides:
-#   - @watch(predicate, context=...) — subscribe to attestation predicates
+#   - @watch(predicate, context=...) — fire on upstream attestations
+#   - @schedule(every=N) — run periodically every N seconds
 #   - upstream — the triggering attestation payload (dict or None)
 #   - attest() — create downstream attestations
 
 @watch('data:incoming', context='my/ctx')
 def process(upstream):
     """Called when a data:incoming attestation fires in my/ctx."""
-    import json
+    payload = upstream or {}
+    subject = payload.get('subjects', ['unknown'])[0]
 
-    payload = json.loads(upstream) if isinstance(upstream, str) else upstream
-    attrs = payload.get('attributes', {})
-    subjects = payload.get('subjects', [])
-    subject = subjects[0] if subjects else 'unknown'
-
-    # Do work
-    result = len(attrs)
-
-    # Attest downstream
     attest(
         subjects=[subject],
         predicates=['data:processed'],
         contexts=['my/ctx'],
-        attributes={
-            'input_attrs': result,
-            'status': 'done',
-        },
+        attributes={'status': 'done'},
+    )
+
+@schedule(every=300, description='Periodic health check')
+def health_check():
+    """Runs every 5 minutes."""
+    import datetime
+    now = datetime.datetime.now().isoformat()
+
+    attest(
+        subjects=['system'],
+        predicates=['health:checked'],
+        contexts=['my/ctx'],
+        attributes={'timestamp': now},
     )

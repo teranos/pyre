@@ -15,7 +15,7 @@ use crate::proto::{
     ConfigSchemaResponse, Empty, ExecuteJobRequest, ExecuteJobResponse, GlyphDefResponse,
     HealthResponse, HttpHeader, HttpRequest, HttpResponse, InitializeRequest, InitializeResponse,
     MetadataResponse, ParseAxQueryRequest, ParseAxQueryResponse, PythonExecuteRequest,
-    PythonExecuteResponse, WatcherRegistration, WebSocketMessage,
+    PythonExecuteResponse, ScheduleInfo, WatcherRegistration, WebSocketMessage,
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -301,8 +301,9 @@ impl DomainPluginService for PythonPluginService {
         // Start with built-in handlers
         let mut handler_names = vec![format!("{}.script", self.name)];
 
-        // Extract @watch decorator metadata and build watcher registrations
+        // Extract @watch and @schedule decorator metadata from discovered handlers
         let mut watchers = vec![];
+        let mut schedules = vec![];
         let mut sorted_handlers: Vec<_> = discovered_handlers.keys().collect();
         sorted_handlers.sort();
         for handler_name in &sorted_handlers {
@@ -310,6 +311,8 @@ impl DomainPluginService for PythonPluginService {
 
             if let Some(code) = discovered_handlers.get(*handler_name) {
                 let state = self.handlers.state.read();
+
+                // @watch decorators
                 let handler_watchers = state.engine.extract_watchers(code);
                 for w in handler_watchers {
                     let watcher_id = format!("{}-{}", handler_name, w.handler_fn);
@@ -328,6 +331,23 @@ impl DomainPluginService for PythonPluginService {
                         max_fires_per_second: 1,
                     });
                 }
+
+                // @schedule decorators
+                let handler_schedules = state.engine.extract_schedules(code);
+                for s in handler_schedules {
+                    let schedule_handler = format!("{}.{}", self.name, handler_name);
+                    info!(
+                        "Schedule: {} every {}s via {}",
+                        s.handler_fn, s.interval_seconds, schedule_handler
+                    );
+                    schedules.push(ScheduleInfo {
+                        handler_name: schedule_handler,
+                        interval_seconds: s.interval_seconds,
+                        enabled_by_default: true,
+                        description: s.description,
+                        ats_code: String::new(),
+                    });
+                }
             }
         }
 
@@ -337,17 +357,19 @@ impl DomainPluginService for PythonPluginService {
         };
         if packages.is_empty() {
             info!(
-                "Python plugin initialized (Python {}) — {} handlers, {} watchers, no packages",
-                py_version,
-                handler_names.len(),
-                watchers.len()
-            );
-        } else {
-            info!(
-                "Python plugin initialized (Python {}) — {} handlers, {} watchers, {} packages: {}",
+                "Python plugin initialized (Python {}) — {} handlers, {} watchers, {} schedules, no packages",
                 py_version,
                 handler_names.len(),
                 watchers.len(),
+                schedules.len()
+            );
+        } else {
+            info!(
+                "Python plugin initialized (Python {}) — {} handlers, {} watchers, {} schedules, {} packages: {}",
+                py_version,
+                handler_names.len(),
+                watchers.len(),
+                schedules.len(),
                 packages.len(),
                 packages.join(", ")
             );
@@ -355,7 +377,7 @@ impl DomainPluginService for PythonPluginService {
 
         Ok(Response::new(InitializeResponse {
             handler_names,
-            schedules: vec![],
+            schedules,
             watchers,
             python_provider: true,
             ..Default::default()
@@ -694,20 +716,37 @@ impl PythonPluginService {
             serde_json::from_slice(&req.payload).ok()
         };
 
-        // Check for @watch-decorated functions — if present, inject the
+        // Check for @watch or @schedule decorated functions — inject the
         // decorator preamble and call the matched handler function
         let exec_code = {
             let state = self.handlers.state.read();
             let watchers = state.engine.extract_watchers(&script_code);
+            let schedules = state.engine.extract_schedules(&script_code);
             if let Some(w) = watchers.first() {
                 format!(
                     concat!(
                         "class watch:\n",
                         "    def __init__(self, predicate, context=None): pass\n",
                         "    def __call__(self, fn): return fn\n",
+                        "class schedule:\n",
+                        "    def __init__(self, every, description=None): pass\n",
+                        "    def __call__(self, fn): return fn\n",
                         "\n{}\n{}(upstream)"
                     ),
                     script_code, w.handler_fn
+                )
+            } else if let Some(s) = schedules.first() {
+                format!(
+                    concat!(
+                        "class schedule:\n",
+                        "    def __init__(self, every, description=None): pass\n",
+                        "    def __call__(self, fn): return fn\n",
+                        "class watch:\n",
+                        "    def __init__(self, predicate, context=None): pass\n",
+                        "    def __call__(self, fn): return fn\n",
+                        "\n{}\n{}()"
+                    ),
+                    script_code, s.handler_fn
                 )
             } else {
                 script_code.clone()
