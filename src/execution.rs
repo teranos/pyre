@@ -139,6 +139,10 @@ impl PythonEngine {
             crate::schedulestore::inject_schedule_functions(py, &globals)
                 .map_err(|e| Error::context("failed to inject schedule functions", e))?;
 
+            // Inject fetch function if fetch client is available
+            crate::fetchstore::inject_fetch_function(py, &globals)
+                .map_err(|e| Error::context("failed to inject fetch function", e))?;
+
             // Inject upstream attestation as Python dict (or None)
             match upstream_attestation {
                 Some(attestation) => {

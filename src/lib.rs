@@ -17,6 +17,7 @@ pub mod atsstore;
 pub mod config;
 pub mod engine;
 pub mod execution;
+pub mod fetchstore;
 mod handlers;
 pub mod proto;
 pub mod schedulestore;

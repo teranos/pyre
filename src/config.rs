@@ -11,6 +11,8 @@ pub struct PluginConfig {
     pub queue_endpoint: String,
     /// Schedule service gRPC endpoint
     pub schedule_endpoint: String,
+    /// Fetch service gRPC endpoint
+    pub fetch_endpoint: String,
     /// Auth token for service calls
     pub auth_token: String,
     /// Custom configuration values

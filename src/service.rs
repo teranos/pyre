@@ -54,6 +54,7 @@ impl PythonPluginService {
                 .collect(),
             ats_client: atsstore::new_shared_client(),
             schedule_client: crate::schedulestore::new_shared_client(),
+            fetch_client: crate::fetchstore::new_shared_client(),
             discovered_handlers: HashMap::new(),
         }));
 
@@ -235,6 +236,7 @@ impl DomainPluginService for PythonPluginService {
                 ats_store_endpoint: req.ats_store_endpoint.clone(),
                 queue_endpoint: req.queue_endpoint,
                 schedule_endpoint: req.schedule_endpoint.clone(),
+                fetch_endpoint: req.fetch_endpoint.clone(),
                 auth_token: req.auth_token.clone(),
                 config: req.config,
             });
@@ -258,6 +260,18 @@ impl DomainPluginService for PythonPluginService {
                     &state.schedule_client,
                     crate::schedulestore::ScheduleConfig {
                         endpoint: req.schedule_endpoint,
+                        auth_token: req.auth_token.clone(),
+                    },
+                );
+            }
+
+            // Initialize Fetch client if endpoint is provided
+            if !req.fetch_endpoint.is_empty() {
+                debug!("Initializing Fetch client for Python HTTP fetching");
+                crate::fetchstore::init_shared_client(
+                    &state.fetch_client,
+                    crate::fetchstore::FetchConfig {
+                        endpoint: req.fetch_endpoint,
                         auth_token: req.auth_token,
                     },
                 );
@@ -781,12 +795,14 @@ impl PythonPluginService {
         let result = {
             let state = self.handlers.state.read();
             crate::schedulestore::set_current_client(state.schedule_client.clone());
+            crate::fetchstore::set_current_client(state.fetch_client.clone());
             let r = state.engine.execute_with_ats(
                 &exec_code,
                 &config,
                 Some(state.ats_client.clone()),
                 upstream.as_ref(),
             );
+            crate::fetchstore::clear_current_client();
             crate::schedulestore::clear_current_client();
             r
         };
