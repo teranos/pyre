@@ -4,12 +4,20 @@
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    qntx-src = {
+      url = "github:teranos/QNTX";
+      flake = false;
+    };
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, flake-utils, qntx-src }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = import nixpkgs { inherit system; };
+
+        outputHashes = {
+          "qntx-core-0.2.44" = "sha256-FK6FsDgkF+qOkRxk5xZP/IagRGpYKS2pmYr9WE1aZCc=";
+        };
 
         pyre = pkgs.rustPlatform.buildRustPackage {
           pname = "pyre";
@@ -18,6 +26,7 @@
 
           cargoLock = {
             lockFile = ./Cargo.lock;
+            inherit outputHashes;
           };
 
           buildInputs = with pkgs; [
@@ -30,6 +39,9 @@
             pkg-config
             protobuf
           ];
+
+          # Proto files live in QNTX repo — tell qntx-grpc build.rs where to find them
+          QNTX_PROTO_DIR = "${qntx-src}/plugin/grpc/protocol";
 
           # Set Python for PyO3
           PYO3_PYTHON = "${pkgs.python313}/bin/python3";
@@ -52,6 +64,7 @@
 
           cargoLock = {
             lockFile = ./Cargo.lock;
+            inherit outputHashes;
           };
 
           nativeBuildInputs = with pkgs; [
@@ -66,6 +79,7 @@
             openssl
           ];
 
+          QNTX_PROTO_DIR = "${qntx-src}/plugin/grpc/protocol";
           PYO3_PYTHON = "${pkgs.python313}/bin/python3";
 
           buildPhase = ''
@@ -107,6 +121,7 @@
             openssl
           ];
 
+          QNTX_PROTO_DIR = "${qntx-src}/plugin/grpc/protocol";
           PYO3_PYTHON = "${pkgs.python313}/bin/python3";
         };
       });
