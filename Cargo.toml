@@ -1,0 +1,43 @@
+[package]
+name = "pyre"
+version = "0.8.2"
+edition = "2021"
+description = "Python runtime engine for QNTX"
+license = "MIT"
+authors = ["QNTX Contributors"]
+repository = "https://github.com/teranos/pyre"
+
+[[bin]]
+name = "pyre"
+path = "src/main.rs"
+
+[dependencies]
+# QNTX gRPC infrastructure
+qntx-grpc = { git = "https://github.com/teranos/QNTX", features = ["plugin"] }
+qntx-proto = { git = "https://github.com/teranos/QNTX" }
+
+# gRPC and async
+tonic = "0.12"
+prost = "0.13"
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+
+# Python embedding via PyO3
+# REQUIRES Nix build (flake.nix) - provides Python deterministically
+# Local cargo builds not supported due to platform-specific Python linking issues
+pyo3 = { version = "0.24", features = ["auto-initialize"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Utilities
+thiserror = "2"
+parking_lot = "0.12"

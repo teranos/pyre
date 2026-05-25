@@ -2,8 +2,6 @@
 
 Python runtime engine for [QNTX](https://github.com/teranos/QNTX). Embeds Python via PyO3 in a Rust gRPC process.
 
-Migrating to [teranos/pyre](https://github.com/teranos/pyre).
-
 ## Why
 
 Full control over the Python execution environment. The Rust binary is the chassis — identical code for all Python plugins. Nix is the configuration surface: each domain gets its own `withPackages` set, its own process, its own port. Same binary, same gRPC protocol, different Python environments.
@@ -28,6 +26,29 @@ Nix-only build (PyO3 requires deterministic Python linking):
 ```bash
 nix build
 ```
+
+### Development iteration
+
+`nix develop` provides a shell with Python 3.13, Rust toolchain, and protobuf. Inside it, `cargo build` and `cargo check` work with incremental compilation (seconds, not minutes).
+
+```bash
+nix develop
+cargo build
+cargo test
+```
+
+### Pre-built binaries
+
+CI pushes builds to [Cachix](https://app.cachix.org/cache/qntx). Downstream consumers can fetch the binary directly instead of compiling Rust:
+
+```bash
+cachix use qntx
+nix build github:teranos/pyre
+```
+
+### Limitation
+
+PyO3 0.24 supports Python up to 3.13. System Python 3.14+ will not work outside of `nix develop`.
 
 ## Usage
 
