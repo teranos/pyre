@@ -32,10 +32,16 @@ nix build
 `nix develop` provides a shell with Python 3.13, Rust toolchain, and protobuf. Inside it, `cargo build` and `cargo check` work with incremental compilation (seconds, not minutes).
 
 ```bash
+# Fast path: build + install in one shot (~3s incremental)
+nix develop -c cargo build && cp target/debug/pyre ~/.qntx/plugins/qntx-pyre-plugin
+
+# Or enter the shell for repeated builds
 nix develop
 cargo build
 cargo test
 ```
+
+`make install` uses `nix build` (full hermetic build) — correct but slow. Use the fast path above for development.
 
 ### Pre-built binaries
 
@@ -56,7 +62,7 @@ QNTX manages the plugin lifecycle. Add to `am.toml`:
 
 ```toml
 [plugin]
-enabled = ["python"]
+enabled = ["pyre"]
 ```
 
 Specialized instances use a Nix flake that wraps the same binary with a different Python environment and `--name`.
