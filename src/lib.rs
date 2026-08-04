@@ -22,6 +22,7 @@ mod handlers;
 pub mod proto;
 pub mod schedulestore;
 pub mod service;
+pub mod version;
 
 pub use config::PluginConfig;
 pub use engine::{ExecutionConfig, ExecutionResult, PythonEngine};

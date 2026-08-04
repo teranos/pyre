@@ -69,7 +69,7 @@ impl AtsStoreClient {
             timestamp: None, // Server will use current time
             attributes,
             source: "python".to_string(),
-            source_version: env!("CARGO_PKG_VERSION").to_string(),
+            source_version: crate::version::version().to_string(),
         };
 
         let request = GenerateAttestationRequest {

@@ -20,7 +20,7 @@ use tracing_subscriber::FmtSubscriber;
 #[derive(clap::Parser, Debug)]
 #[command(name = "pyre")]
 #[command(about = "Python runtime engine for QNTX")]
-#[command(version)]
+#[command(version = pyre::version::version())]
 struct Args {
     /// gRPC server port
     #[arg(short, long, default_value = "9000")]
@@ -38,10 +38,6 @@ struct Args {
     /// Defaults to name derived from binary: qntx-{name}-plugin -> {name}
     #[arg(long)]
     name: Option<String>,
-
-    /// Print version and exit
-    #[arg(short = 'V', long)]
-    version: bool,
 }
 
 /// Max port retries when the requested port is occupied (multi-session conflicts).
@@ -71,11 +67,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use clap::Parser;
     let args = Args::parse();
 
-    if args.version {
-        println!("pyre {}", env!("CARGO_PKG_VERSION"));
-        return Ok(());
-    }
-
     // Set up logging
     let log_level = match args.log_level.as_str() {
         "debug" => Level::DEBUG,
@@ -92,10 +83,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_line_number(false)
         .init();
 
-    debug!(
-        "Initializing Pyre v{}",
-        env!("CARGO_PKG_VERSION")
-    );
+    debug!("Initializing Pyre v{}", pyre::version::version());
 
     // Bind with port retry to handle multi-session port conflicts.
     let listener = if let Some(address) = args.address {

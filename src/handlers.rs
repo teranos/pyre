@@ -234,7 +234,7 @@ impl HandlerContext {
 
         let response = VersionResponse {
             python_version: self.python_version(),
-            plugin_version: env!("CARGO_PKG_VERSION").to_string(),
+            plugin_version: crate::version::version().to_string(),
         };
 
         json_response(200, &response)

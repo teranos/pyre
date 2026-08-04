@@ -17,6 +17,7 @@ use crate::proto::{
     MetadataResponse, ParseAxQueryRequest, ParseAxQueryResponse, PythonExecuteRequest,
     PythonExecuteResponse, ScheduleInfo, WatcherRegistration, WebSocketMessage,
 };
+use crate::version::version;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::pin::Pin;
@@ -208,7 +209,7 @@ impl DomainPluginService for PythonPluginService {
         debug!("Metadata request received");
         Ok(Response::new(MetadataResponse {
             name: self.name.clone(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: version().to_string(),
             qntx_version: ">=0.1.0".to_string(),
             description: "Python execution plugin - run Python code within QNTX".to_string(),
             author: "QNTX Contributors".to_string(),
@@ -697,7 +698,7 @@ impl PythonPluginService {
                 progress_total: 0,
                 cost_actual: 0.0,
                 log_entries: vec![],
-                plugin_version: env!("CARGO_PKG_VERSION").to_string(),
+                plugin_version: version().to_string(),
             }))
         } else {
             // Execution failed
@@ -711,7 +712,7 @@ impl PythonPluginService {
                 progress_total: 0,
                 cost_actual: 0.0,
                 log_entries: vec![],
-                plugin_version: env!("CARGO_PKG_VERSION").to_string(),
+                plugin_version: version().to_string(),
             }))
         }
     }
@@ -828,7 +829,7 @@ impl PythonPluginService {
                 progress_total: 0,
                 cost_actual: 0.0,
                 log_entries: vec![],
-                plugin_version: env!("CARGO_PKG_VERSION").to_string(),
+                plugin_version: version().to_string(),
             }))
         } else {
             // Execution failed
@@ -842,7 +843,7 @@ impl PythonPluginService {
                 progress_total: 0,
                 cost_actual: 0.0,
                 log_entries: vec![],
-                plugin_version: env!("CARGO_PKG_VERSION").to_string(),
+                plugin_version: version().to_string(),
             }))
         }
     }
@@ -859,7 +860,21 @@ mod tests {
         let response = service.metadata(Request::new(Empty {})).await.unwrap();
         let meta = response.into_inner();
         assert_eq!(meta.name, "python");
-        assert!(!meta.version.is_empty());
+        assert_eq!(meta.version, version());
+    }
+
+    #[tokio::test]
+    async fn test_http_version_endpoint_reports_plugin_version() {
+        let service = PythonPluginService::new("python").unwrap();
+        let result = service.handlers.handle_version().await.unwrap();
+
+        #[derive(Deserialize)]
+        struct VersionResponse {
+            plugin_version: String,
+        }
+
+        let response: VersionResponse = serde_json::from_slice(&result.body).unwrap();
+        assert_eq!(response.plugin_version, version());
     }
 
     #[tokio::test]
