@@ -31,7 +31,7 @@ jobs:
         run: nix build --show-trace
 
       - name: Run tests
-        run: nix build --show-trace -L 2>&1 || true
+        run: nix develop -c cargo test
 
       - name: Push to Cachix
         run: nix build --print-out-paths --no-link | cachix push qntx
