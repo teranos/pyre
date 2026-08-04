@@ -380,6 +380,24 @@ impl DomainPluginService for PythonPluginService {
             }
         }
 
+        // Register a watcher on handler attestations in our own context so that
+        // attest.fish hot-deploys take effect without a plugin restart.
+        // FIXME(tier-2): when the new handler code changes @watch predicates/contexts,
+        // the watcher registrations with QNTX are stale (they were set during initialize).
+        // Full hot reload requires either a dynamic UpdateWatchers RPC or a re-initialize.
+        let reload_handler = format!("{}.__reload", self.name);
+        handler_names.push(reload_handler.clone());
+        watchers.push(WatcherRegistration {
+            id: format!("{}-handler-reload", self.name),
+            handler_name: reload_handler,
+            predicates: vec!["handler".to_string()],
+            contexts: vec![self.name.clone()],
+            subjects: vec![],
+            actors: vec![],
+            max_fires_per_second: 1,
+        });
+        info!("Watcher: {}-handler-reload watches [\"handler\"] in [\"{}\"] (hot reload)", self.name, self.name);
+
         let packages = {
             let state = self.handlers.state.read();
             state.engine.installed_packages()
@@ -569,9 +587,12 @@ impl DomainPluginService for PythonPluginService {
 
         // Route to handler based on handler_name
         let script_handler = format!("{}.script", self.name);
+        let reload_handler = format!("{}.__reload", self.name);
         let prefix = format!("{}.", self.name);
 
-        if handler_name == script_handler {
+        if handler_name == reload_handler {
+            self.handle_handler_reload().await
+        } else if handler_name == script_handler {
             self.execute_python_script_job(req).await
         } else if let Some(stripped) = handler_name.strip_prefix(&prefix) {
             self.execute_discovered_handler_job(req, stripped).await
@@ -636,6 +657,42 @@ impl PythonService for PythonPluginService {
 
 // Helper methods for PythonPluginService
 impl PythonPluginService {
+    /// Hot-reload handler code from ATS store.
+    ///
+    /// Triggered by a watcher on predicate="handler" in our own context.
+    /// Re-queries ATS for the latest handler attestations and swaps the
+    /// in-memory discovered_handlers map.
+    async fn handle_handler_reload(&self) -> Result<Response<ExecuteJobResponse>, Status> {
+        let config = {
+            let state = self.handlers.state.read();
+            state.config.clone()
+        };
+
+        let new_handlers = self.discover_handlers_from_config(config).await;
+        let count = new_handlers.len();
+
+        {
+            let mut state = self.handlers.state.write();
+            state.discovered_handlers = new_handlers;
+        }
+
+        info!("Hot-reloaded {} handler(s) from ATS store", count);
+
+        Ok(Response::new(ExecuteJobResponse {
+            success: true,
+            error: String::new(),
+            result: serde_json::to_vec(&serde_json::json!({
+                "reloaded": count,
+            }))
+            .unwrap_or_default(),
+            progress_current: 0,
+            progress_total: 0,
+            cost_actual: 0.0,
+            log_entries: vec![],
+            plugin_version: version().to_string(),
+        }))
+    }
+
     /// Execute a python.script job
     async fn execute_python_script_job(
         &self,
