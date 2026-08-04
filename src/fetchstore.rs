@@ -32,32 +32,35 @@ struct FetchResult {
     attestation_id: String,
 }
 
+/// The claim a fetch makes about what it retrieved: the whole request except
+/// where it went. Grouped because six positional parameters let two adjacent
+/// strings swap places without the compiler noticing.
+struct FetchAttestation {
+    subjects: Vec<String>,
+    predicate: String,
+    context: String,
+    fresh: bool,
+    actor: String,
+    source: String,
+}
+
 impl FetchClient {
     pub fn new(config: FetchConfig) -> Self {
         Self { config }
     }
 
-    fn fetch(
-        &self,
-        url: &str,
-        subjects: Vec<String>,
-        predicate: &str,
-        context: &str,
-        fresh: bool,
-        actor: &str,
-        source: &str,
-    ) -> Result<FetchResult, String> {
+    fn fetch(&self, url: &str, attest: FetchAttestation) -> Result<FetchResult, String> {
         let endpoint = self.config.endpoint.clone();
         let auth_token = self.config.auth_token.clone();
         let request = qntx_proto::FetchRequest {
             auth_token,
             url: url.to_string(),
-            subjects,
-            predicate: predicate.to_string(),
-            context: context.to_string(),
-            fresh,
-            actor: actor.to_string(),
-            source: source.to_string(),
+            subjects: attest.subjects,
+            predicate: attest.predicate,
+            context: attest.context,
+            fresh: attest.fresh,
+            actor: attest.actor,
+            source: attest.source,
         };
 
         let response = std::thread::spawn(move || {
@@ -131,6 +134,7 @@ pub fn clear_current_client() {
 /// Returns a dict with body, status_code, and attestation_id.
 #[pyfunction]
 #[pyo3(signature = (url, subjects=None, predicate="http:get", context="", fresh=false, actor="", source=""))]
+#[allow(clippy::too_many_arguments)] // The arity is fetch()'s Python signature.
 fn fetch(
     py: Python<'_>,
     url: String,
@@ -141,7 +145,14 @@ fn fetch(
     actor: &str,
     source: &str,
 ) -> PyResult<PyObject> {
-    let subjects = subjects.unwrap_or_default();
+    let attest = FetchAttestation {
+        subjects: subjects.unwrap_or_default(),
+        predicate: predicate.to_string(),
+        context: context.to_string(),
+        fresh,
+        actor: actor.to_string(),
+        source: source.to_string(),
+    };
 
     let result = CURRENT_CLIENT.with(|c| {
         let client_opt = c.borrow();
@@ -149,9 +160,7 @@ fn fetch(
             Some(shared) => {
                 let mut guard = shared.lock();
                 match guard.as_mut() {
-                    Some(client) => {
-                        client.fetch(&url, subjects, predicate, context, fresh, actor, source)
-                    }
+                    Some(client) => client.fetch(&url, attest),
                     None => Err("Fetch client not initialized".to_string()),
                 }
             }
