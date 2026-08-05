@@ -363,7 +363,7 @@ class schedule:
     /// The function `@handler` marks, if the script marks one. @schedule and
     /// @watch say when a handler fires on its own; a reconciler fires when it
     /// is asked, so it names its entry point without claiming either.
-    pub fn extract_handler(&self, code: &str) -> Option<String> {
+    pub fn extract_handler(&self, code: &str) -> Result<Option<String>, String> {
         let preamble = r#"
 _qntx_handler = []
 
@@ -389,14 +389,30 @@ class watch:
         );
         let result = self.execute(&extract_code, &ExecutionConfig::default());
         if !result.success {
-            return None;
+            // Returning None here would be indistinguishable from "the script
+            // marks no handler", and the reason would be gone — which is how
+            // a NameError reached a user with the cause discarded in here.
+            return Err(format!(
+                "failed to read @handler from the script: {}{}",
+                result.error.unwrap_or_else(|| "no reason given".to_string()),
+                if result.stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", result.stderr.trim())
+                }
+            ));
         }
 
         match result.result {
-            Some(serde_json::Value::String(ref s)) => serde_json::from_str::<Vec<String>>(s)
-                .ok()
-                .and_then(|names| names.into_iter().next()),
-            _ => None,
+            Some(serde_json::Value::String(ref s)) => {
+                let names: Vec<String> = serde_json::from_str(s).map_err(|e| {
+                    format!("failed to parse the @handler extraction result: {e}")
+                })?;
+                Ok(names.into_iter().next())
+            }
+            other => Err(format!(
+                "the @handler extraction returned no usable result: {other:?}"
+            )),
         }
     }
 
@@ -605,7 +621,7 @@ mod tests {
         let engine = PythonEngine::new().unwrap();
         let script = "@handler()\ndef reconcile():\n    pass\n";
 
-        assert_eq!(engine.extract_handler(script).as_deref(), Some("reconcile"));
+        assert_eq!(engine.extract_handler(script).unwrap().as_deref(), Some("reconcile"));
         assert!(engine.extract_schedules(script).is_empty());
         assert!(engine.extract_watchers(script).is_empty());
     }
@@ -615,7 +631,7 @@ mod tests {
         let engine = PythonEngine::new().unwrap();
         let scheduled = "@schedule(every=60)\ndef tick():\n    pass\n";
 
-        assert_eq!(engine.extract_handler(scheduled), None);
+        assert_eq!(engine.extract_handler(scheduled).unwrap(), None);
         assert_eq!(engine.extract_schedules(scheduled).len(), 1);
     }
 

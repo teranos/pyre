@@ -806,7 +806,12 @@ impl PythonPluginService {
         // decorator preamble and call the matched handler function
         let exec_code = {
             let state = self.handlers.state.read();
-            let marked = state.engine.extract_handler(&script_code);
+            // A failure here reaches the caller rather than reading as "no
+            // @handler", which would send the script on to run undecorated.
+            let marked = state
+                .engine
+                .extract_handler(&script_code)
+                .map_err(Status::internal)?;
             let watchers = state.engine.extract_watchers(&script_code);
             let schedules = state.engine.extract_schedules(&script_code);
             if let Some(name) = marked.as_deref() {
