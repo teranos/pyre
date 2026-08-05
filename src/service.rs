@@ -342,7 +342,11 @@ impl DomainPluginService for PythonPluginService {
                 let state = self.handlers.state.read();
 
                 // @watch decorators
-                let handler_watchers = state.engine.extract_watchers(code);
+                // A handler whose decorators cannot be read registers nothing
+                // and looks like a handler that declared nothing. Say it.
+                let handler_watchers = state.engine.extract_watchers(code).map_err(|e| {
+                    Status::internal(format!("handler {handler_name}: {e}"))
+                })?;
                 for w in handler_watchers {
                     let watcher_id = format!("{}-{}", handler_name, w.handler_fn);
                     let watcher_handler = format!("{}.{}", self.name, handler_name);
@@ -362,7 +366,9 @@ impl DomainPluginService for PythonPluginService {
                 }
 
                 // @schedule decorators
-                let handler_schedules = state.engine.extract_schedules(code);
+                let handler_schedules = state.engine.extract_schedules(code).map_err(|e| {
+                    Status::internal(format!("handler {handler_name}: {e}"))
+                })?;
                 for s in handler_schedules {
                     let schedule_handler = format!("{}.{}", self.name, handler_name);
                     info!(
@@ -503,7 +509,11 @@ impl DomainPluginService for PythonPluginService {
                         name: "Content-Type".to_string(),
                         values: vec!["application/json".to_string()],
                     }],
-                    body: serde_json::to_vec(&error_body).unwrap_or_default(),
+                    // An empty body would turn a described failure into a
+                    // blank 500, losing the description just built.
+                    body: serde_json::to_vec(&error_body).map_err(|e| {
+                        Status::internal(format!("failed to serialize the error body: {e}"))
+                    })?,
                 }))
             }
         }
@@ -620,7 +630,11 @@ impl PythonService for PythonPluginService {
         let upstream: Option<serde_json::Value> = if req.upstream_attestation.is_empty() {
             None
         } else {
-            serde_json::from_slice(&req.upstream_attestation).ok()
+            // A handler that reads `upstream` would see None and conclude it
+            // was not triggered by anything, which is not what happened.
+            Some(serde_json::from_slice(&req.upstream_attestation).map_err(|e| {
+                Status::invalid_argument(format!("upstream attestation is not valid JSON: {e}"))
+            })?)
         };
 
         // Set glyph ID for actor convention
@@ -645,7 +659,11 @@ impl PythonService for PythonPluginService {
 
         crate::atsstore::set_current_glyph_id(None);
 
-        let result_bytes = serde_json::to_vec(&result).unwrap_or_default();
+        // Empty bytes read as "the handler returned nothing", which is a
+        // different fact from "the result could not be serialized".
+        let result_bytes = serde_json::to_vec(&result).map_err(|e| {
+            Status::internal(format!("failed to serialize the execution result: {e}"))
+        })?;
         Ok(Response::new(PythonExecuteResponse {
             success: result.success,
             output: result.stdout,
@@ -799,68 +817,21 @@ impl PythonPluginService {
         let upstream: Option<serde_json::Value> = if req.payload.is_empty() {
             None
         } else {
-            serde_json::from_slice(&req.payload).ok()
+            // Same as the other door: a malformed payload must not read as
+            // "no upstream", or the handler runs on a lie about its trigger.
+            Some(serde_json::from_slice(&req.payload).map_err(|e| {
+                Status::invalid_argument(format!("watcher payload is not valid JSON: {e}"))
+            })?)
         };
 
-        // Check for @watch or @schedule decorated functions — inject the
-        // decorator preamble and call the matched handler function
+        // One preparation, shared with the HTTP door, so the same file
+        // behaves the same way whichever way it arrives.
         let exec_code = {
             let state = self.handlers.state.read();
-            // A failure here reaches the caller rather than reading as "no
-            // @handler", which would send the script on to run undecorated.
-            let marked = state
+            state
                 .engine
-                .extract_handler(&script_code)
-                .map_err(Status::internal)?;
-            let watchers = state.engine.extract_watchers(&script_code);
-            let schedules = state.engine.extract_schedules(&script_code);
-            if let Some(name) = marked.as_deref() {
-                // @handler names the entry point and says nothing about when
-                // it fires, so a script that only runs on request can exist.
-                format!(
-                    concat!(
-                        "class handler:\n",
-                        "    def __init__(self, description=None): pass\n",
-                        "    def __call__(self, fn): return fn\n",
-                        "class watch:\n",
-                        "    def __init__(self, predicate, context=None): pass\n",
-                        "    def __call__(self, fn): return fn\n",
-                        "class schedule:\n",
-                        "    def __init__(self, every, description=None): pass\n",
-                        "    def __call__(self, fn): return fn\n",
-                        "\n{}\n{}()"
-                    ),
-                    script_code, name
-                )
-            } else if let Some(w) = watchers.first() {
-                format!(
-                    concat!(
-                        "class watch:\n",
-                        "    def __init__(self, predicate, context=None): pass\n",
-                        "    def __call__(self, fn): return fn\n",
-                        "class schedule:\n",
-                        "    def __init__(self, every, description=None): pass\n",
-                        "    def __call__(self, fn): return fn\n",
-                        "\n{}\n{}(upstream)"
-                    ),
-                    script_code, w.handler_fn
-                )
-            } else if let Some(s) = schedules.first() {
-                format!(
-                    concat!(
-                        "class schedule:\n",
-                        "    def __init__(self, every, description=None): pass\n",
-                        "    def __call__(self, fn): return fn\n",
-                        "class watch:\n",
-                        "    def __init__(self, predicate, context=None): pass\n",
-                        "    def __call__(self, fn): return fn\n",
-                        "\n{}\n{}()"
-                    ),
-                    script_code, s.handler_fn
-                )
-            } else {
-                script_code.clone()
-            }
+                .prepared(&script_code)
+                .map_err(Status::internal)?
         };
 
         // Execute the Python script with upstream attestation

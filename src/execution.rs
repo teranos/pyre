@@ -10,6 +10,20 @@ use qntx_grpc::error::Error;
 use std::collections::HashMap;
 use std::ffi::CString;
 
+/// Why an extraction could not answer. Extraction runs the module, so the
+/// reason is usually the script's own — and it is the only copy of it.
+fn extraction_failed(what: &str, result: &ExecutionResult) -> String {
+    let reason = result.error.clone().unwrap_or_else(|| "no reason given".into());
+    if result.stderr.trim().is_empty() {
+        format!("failed to read {what} from the script: {reason}")
+    } else {
+        format!(
+            "failed to read {what} from the script: {reason} ({})",
+            result.stderr.trim()
+        )
+    }
+}
+
 /// Maximum length for captured variable values before truncation
 const MAX_VARIABLE_LENGTH: usize = 1000;
 
@@ -281,11 +295,15 @@ impl PythonEngine {
     /// Injects a `watch` decorator into the Python namespace, executes the script
     /// to register decorated functions, then collects the watcher metadata.
     /// Returns empty vec if no decorators found or on error.
-    pub fn extract_watchers(&self, code: &str) -> Vec<WatcherInfo> {
+    pub fn extract_watchers(&self, code: &str) -> Result<Vec<WatcherInfo>, String> {
         // Python preamble: define @watch decorator that records metadata
         // Also stub @schedule so scripts using both don't crash
         let preamble = r#"
 _qntx_watchers = []
+
+class handler:
+    def __init__(self, description=None): pass
+    def __call__(self, fn): return fn
 
 class watch:
     def __init__(self, predicate, context=None):
@@ -312,7 +330,7 @@ class schedule:
         };
         let result = self.execute(&full_code, &config);
         if !result.success {
-            return vec![];
+            return Err(extraction_failed("@watch", &result));
         }
 
         // Extract _qntx_watchers from the execution result
@@ -323,22 +341,20 @@ class schedule:
         );
         let result = self.execute(&extract_code, &ExecutionConfig::default());
         if !result.success {
-            return vec![];
+            return Err(extraction_failed("@watch", &result));
         }
 
-        let json_val = match result.result {
-            Some(serde_json::Value::String(ref s)) => {
-                serde_json::from_str::<Vec<serde_json::Value>>(s).ok()
+        let entries: Vec<serde_json::Value> = match result.result {
+            Some(serde_json::Value::String(ref s)) => serde_json::from_str(s)
+                .map_err(|e| format!("failed to parse the @watch extraction result: {e}"))?,
+            other => {
+                return Err(format!(
+                    "the @watch extraction returned no usable result: {other:?}"
+                ))
             }
-            _ => None,
         };
 
-        let entries = match json_val {
-            Some(v) => v,
-            None => return vec![],
-        };
-
-        entries
+        Ok(entries
             .iter()
             .filter_map(|entry| {
                 let handler_fn = entry.get("handler_fn")?.as_str()?;
@@ -353,16 +369,59 @@ class schedule:
                     contexts: vec![context.to_string()],
                 })
             })
-            .collect()
+            .collect())
     }
 
-    /// Extract @schedule decorator metadata from a handler script.
-    ///
-    /// Same pattern as extract_watchers: injects a `schedule` decorator,
-    /// executes the script, collects metadata.
-    /// The function `@handler` marks, if the script marks one. @schedule and
-    /// @watch say when a handler fires on its own; a reconciler fires when it
-    /// is asked, so it names its entry point without claiming either.
+    /// A script as Python must receive it: decorators stubbed, entry point
+    /// called. Returns the code unchanged when nothing is decorated, so a
+    /// plain snippet still runs.
+    pub fn prepared(&self, code: &str) -> Result<String, String> {
+        const STUBS: &str = concat!(
+            "class handler:\n",
+            "    def __init__(self, description=None): pass\n",
+            "    def __call__(self, fn): return fn\n",
+            "class watch:\n",
+            "    def __init__(self, predicate, context=None): pass\n",
+            "    def __call__(self, fn): return fn\n",
+            "class schedule:\n",
+            "    def __init__(self, every, description=None): pass\n",
+            "    def __call__(self, fn): return fn\n",
+        );
+
+        // Extraction runs the module to find decorators, so a plain script
+        // can fail it for reasons that are not about decorators at all. The
+        // failure only means something when the source claims one.
+        let claims_decorator = code.contains("@handler")
+            || code.contains("@watch")
+            || code.contains("@schedule");
+
+        match self.extract_handler(code) {
+            Ok(Some(name)) => return Ok(format!("{STUBS}\n{code}\n{name}()")),
+            Ok(None) => {}
+            Err(e) if claims_decorator => return Err(e),
+            Err(_) => return Ok(code.to_string()),
+        }
+        match self.extract_watchers(code) {
+            Ok(ws) => {
+                if let Some(w) = ws.first() {
+                    return Ok(format!("{STUBS}\n{code}\n{}(upstream)", w.handler_fn));
+                }
+            }
+            Err(e) if claims_decorator => return Err(e),
+            Err(_) => return Ok(code.to_string()),
+        }
+        match self.extract_schedules(code) {
+            Ok(ss) => {
+                if let Some(s) = ss.first() {
+                    return Ok(format!("{STUBS}\n{code}\n{}()", s.handler_fn));
+                }
+            }
+            Err(e) if claims_decorator => return Err(e),
+            Err(_) => return Ok(code.to_string()),
+        }
+        Ok(code.to_string())
+    }
+
     pub fn extract_handler(&self, code: &str) -> Result<Option<String>, String> {
         let preamble = r#"
 _qntx_handler = []
@@ -416,10 +475,14 @@ class watch:
         }
     }
 
-    pub fn extract_schedules(&self, code: &str) -> Vec<crate::engine::ScheduleMetadata> {
+    pub fn extract_schedules(&self, code: &str) -> Result<Vec<crate::engine::ScheduleMetadata>, String> {
         // Also stub @watch so scripts using both don't crash
         let preamble = r#"
 _qntx_schedules = []
+
+class handler:
+    def __init__(self, description=None): pass
+    def __call__(self, fn): return fn
 
 class schedule:
     def __init__(self, every, description=None):
@@ -445,22 +508,20 @@ class watch:
         );
         let result = self.execute(&extract_code, &ExecutionConfig::default());
         if !result.success {
-            return vec![];
+            return Err(extraction_failed("@schedule", &result));
         }
 
-        let json_val = match result.result {
-            Some(serde_json::Value::String(ref s)) => {
-                serde_json::from_str::<Vec<serde_json::Value>>(s).ok()
+        let entries: Vec<serde_json::Value> = match result.result {
+            Some(serde_json::Value::String(ref s)) => serde_json::from_str(s)
+                .map_err(|e| format!("failed to parse the @schedule extraction result: {e}"))?,
+            other => {
+                return Err(format!(
+                    "the @schedule extraction returned no usable result: {other:?}"
+                ))
             }
-            _ => None,
         };
 
-        let entries = match json_val {
-            Some(v) => v,
-            None => return vec![],
-        };
-
-        entries
+        Ok(entries
             .iter()
             .filter_map(|entry| {
                 let handler_fn = entry.get("handler_fn")?.as_str()?;
@@ -479,7 +540,7 @@ class watch:
                     description,
                 })
             })
-            .collect()
+            .collect())
     }
 
     /// Install a package using uv (preferred) or pip.
@@ -622,8 +683,29 @@ mod tests {
         let script = "@handler()\ndef reconcile():\n    pass\n";
 
         assert_eq!(engine.extract_handler(script).unwrap().as_deref(), Some("reconcile"));
-        assert!(engine.extract_schedules(script).is_empty());
-        assert!(engine.extract_watchers(script).is_empty());
+        assert!(engine.extract_schedules(script).unwrap().is_empty());
+        assert!(engine.extract_watchers(script).unwrap().is_empty());
+    }
+
+    // stoke posted a @handler script to the HTTP door, which ran it as
+    // written, and Python raised NameError on the decorator.
+    #[test]
+    fn a_decorated_script_runs_through_the_http_door() {
+        let engine = PythonEngine::new().unwrap();
+        let script = "@handler()\ndef go():\n    print('ran')\n";
+
+        let ready = engine.prepared(script).unwrap();
+        let result = engine.execute(&ready, &ExecutionConfig::default());
+
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(result.stdout.trim(), "ran");
+    }
+
+    #[test]
+    fn an_undecorated_script_is_left_alone() {
+        let engine = PythonEngine::new().unwrap();
+        let plain = "print('plain')\n";
+        assert_eq!(engine.prepared(plain).unwrap(), plain);
     }
 
     #[test]
@@ -632,7 +714,7 @@ mod tests {
         let scheduled = "@schedule(every=60)\ndef tick():\n    pass\n";
 
         assert_eq!(engine.extract_handler(scheduled).unwrap(), None);
-        assert_eq!(engine.extract_schedules(scheduled).len(), 1);
+        assert_eq!(engine.extract_schedules(scheduled).unwrap().len(), 1);
     }
 
     #[test]
@@ -683,7 +765,7 @@ def handle(upstream):
     pass
 "#;
 
-        let watchers = engine.extract_watchers(code);
+        let watchers = engine.extract_watchers(code).unwrap();
         assert_eq!(watchers.len(), 1);
         assert_eq!(watchers[0].predicates, vec!["data:processed"]);
         assert_eq!(watchers[0].contexts, vec!["test/ctx"]);
@@ -705,7 +787,7 @@ def handle_b(upstream):
     pass
 "#;
 
-        let watchers = engine.extract_watchers(code);
+        let watchers = engine.extract_watchers(code).unwrap();
         assert_eq!(watchers.len(), 2);
         assert_eq!(watchers[0].handler_fn, "handle_a");
         assert_eq!(watchers[1].handler_fn, "handle_b");
@@ -717,7 +799,7 @@ def handle_b(upstream):
         let engine = PythonEngine::new().unwrap();
 
         let code = "x = 42\ndef helper(): pass\n";
-        let watchers = engine.extract_watchers(code);
+        let watchers = engine.extract_watchers(code).unwrap();
         assert!(watchers.is_empty());
     }
 
@@ -732,7 +814,7 @@ def handle(upstream):
     pass
 "#;
 
-        let watchers = engine.extract_watchers(code);
+        let watchers = engine.extract_watchers(code).unwrap();
         // Missing context should not silently succeed — no watcher extracted
         assert!(watchers.is_empty());
     }
@@ -748,7 +830,7 @@ def handle(upstream):
     pass
 "#;
 
-        let watchers = engine.extract_watchers(code);
+        let watchers = engine.extract_watchers(code).unwrap();
         assert!(watchers.is_empty());
     }
 
@@ -762,7 +844,7 @@ def check_status():
     pass
 "#;
 
-        let schedules = engine.extract_schedules(code);
+        let schedules = engine.extract_schedules(code).unwrap();
         assert_eq!(schedules.len(), 1);
         assert_eq!(schedules[0].handler_fn, "check_status");
         assert_eq!(schedules[0].interval_seconds, 300);
@@ -778,7 +860,7 @@ def poll():
     pass
 "#;
 
-        let schedules = engine.extract_schedules(code);
+        let schedules = engine.extract_schedules(code).unwrap();
         assert_eq!(schedules.len(), 1);
         assert_eq!(schedules[0].handler_fn, "poll");
         assert_eq!(schedules[0].interval_seconds, 60);
@@ -790,7 +872,7 @@ def poll():
         let engine = PythonEngine::new().unwrap();
 
         let code = "x = 42\ndef helper(): pass\n";
-        let schedules = engine.extract_schedules(code);
+        let schedules = engine.extract_schedules(code).unwrap();
         assert!(schedules.is_empty());
     }
 
@@ -804,7 +886,7 @@ def noop():
     pass
 "#;
 
-        let schedules = engine.extract_schedules(code);
+        let schedules = engine.extract_schedules(code).unwrap();
         assert!(schedules.is_empty());
     }
 
@@ -822,8 +904,8 @@ def periodic():
     pass
 "#;
 
-        let watchers = engine.extract_watchers(code);
-        let schedules = engine.extract_schedules(code);
+        let watchers = engine.extract_watchers(code).unwrap();
+        let schedules = engine.extract_schedules(code).unwrap();
         assert_eq!(watchers.len(), 1);
         assert_eq!(schedules.len(), 1);
         assert_eq!(watchers[0].handler_fn, "on_data");

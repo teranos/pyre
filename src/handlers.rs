@@ -91,8 +91,15 @@ impl HandlerContext {
 
         let result = {
             let state = self.state.read();
+            // A decorated script needs its decorators defined before it runs.
+            // Without this the gRPC path prepared them and this one did not,
+            // and the same file behaved differently depending on the door.
+            let content = state
+                .engine
+                .prepared(&req.content)
+                .map_err(Status::internal)?;
             state.engine.execute_with_ats(
-                &req.content,
+                &content,
                 &config,
                 Some(state.ats_client.clone()),
                 req.upstream_attestation.as_ref(),

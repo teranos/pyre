@@ -127,7 +127,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Derive plugin name from --name flag or binary name (qntx-{name}-plugin -> {name})
     let name = args.name.unwrap_or_else(|| {
+        // A plugin that cannot read its own path names itself "python" and
+        // registers under the wrong key, which looks like a missing plugin
+        // rather than a failure to ask the OS a question.
         std::env::current_exe()
+            .inspect_err(|e| eprintln!("WARNING: cannot read this binary's path, so the plugin name falls back to \"python\": {e}"))
             .ok()
             .and_then(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()))
             .and_then(|bin| {
