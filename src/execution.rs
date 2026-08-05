@@ -360,6 +360,46 @@ class schedule:
     ///
     /// Same pattern as extract_watchers: injects a `schedule` decorator,
     /// executes the script, collects metadata.
+    /// The function `@handler` marks, if the script marks one. @schedule and
+    /// @watch say when a handler fires on its own; a reconciler fires when it
+    /// is asked, so it names its entry point without claiming either.
+    pub fn extract_handler(&self, code: &str) -> Option<String> {
+        let preamble = r#"
+_qntx_handler = []
+
+class handler:
+    def __init__(self, description=None):
+        self._description = description
+    def __call__(self, fn):
+        _qntx_handler.append(fn.__name__)
+        return fn
+
+class schedule:
+    def __init__(self, every, description=None): pass
+    def __call__(self, fn): return fn
+
+class watch:
+    def __init__(self, predicate, context=None): pass
+    def __call__(self, fn): return fn
+"#;
+
+        let extract_code = format!(
+            "{}\n{}\nimport json\n_result = json.dumps(_qntx_handler)",
+            preamble, code
+        );
+        let result = self.execute(&extract_code, &ExecutionConfig::default());
+        if !result.success {
+            return None;
+        }
+
+        match result.result {
+            Some(serde_json::Value::String(ref s)) => serde_json::from_str::<Vec<String>>(s)
+                .ok()
+                .and_then(|names| names.into_iter().next()),
+            _ => None,
+        }
+    }
+
     pub fn extract_schedules(&self, code: &str) -> Vec<crate::engine::ScheduleMetadata> {
         // Also stub @watch so scripts using both don't crash
         let preamble = r#"
@@ -557,6 +597,27 @@ fn capture_variables(globals: &Bound<'_, PyDict>) -> HashMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Before @handler the only way to name an entry point was to claim a
+    // period or an event, and an invented period runs the thing again.
+    #[test]
+    fn handler_names_an_entry_point_without_a_period() {
+        let engine = PythonEngine::new().unwrap();
+        let script = "@handler()\ndef reconcile():\n    pass\n";
+
+        assert_eq!(engine.extract_handler(script).as_deref(), Some("reconcile"));
+        assert!(engine.extract_schedules(script).is_empty());
+        assert!(engine.extract_watchers(script).is_empty());
+    }
+
+    #[test]
+    fn a_script_without_handler_marks_nothing() {
+        let engine = PythonEngine::new().unwrap();
+        let scheduled = "@schedule(every=60)\ndef tick():\n    pass\n";
+
+        assert_eq!(engine.extract_handler(scheduled), None);
+        assert_eq!(engine.extract_schedules(scheduled).len(), 1);
+    }
 
     #[test]
     fn test_simple_execution() {

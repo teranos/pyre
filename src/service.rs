@@ -806,9 +806,28 @@ impl PythonPluginService {
         // decorator preamble and call the matched handler function
         let exec_code = {
             let state = self.handlers.state.read();
+            let marked = state.engine.extract_handler(&script_code);
             let watchers = state.engine.extract_watchers(&script_code);
             let schedules = state.engine.extract_schedules(&script_code);
-            if let Some(w) = watchers.first() {
+            if let Some(name) = marked.as_deref() {
+                // @handler names the entry point and says nothing about when
+                // it fires, so a script that only runs on request can exist.
+                format!(
+                    concat!(
+                        "class handler:\n",
+                        "    def __init__(self, description=None): pass\n",
+                        "    def __call__(self, fn): return fn\n",
+                        "class watch:\n",
+                        "    def __init__(self, predicate, context=None): pass\n",
+                        "    def __call__(self, fn): return fn\n",
+                        "class schedule:\n",
+                        "    def __init__(self, every, description=None): pass\n",
+                        "    def __call__(self, fn): return fn\n",
+                        "\n{}\n{}()"
+                    ),
+                    script_code, name
+                )
+            } else if let Some(w) = watchers.first() {
                 format!(
                     concat!(
                         "class watch:\n",
