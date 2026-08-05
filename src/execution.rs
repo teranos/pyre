@@ -129,10 +129,10 @@ impl PythonEngine {
                 let _ = path_list.insert(0, path);
             }
 
-            // Inject attest() function if ATSStore client is available
+            // Inject attest()/last() if an ATSStore client is available
             if inject_attest {
-                atsstore::inject_attest_function(py, &globals)
-                    .map_err(|e| Error::context("failed to inject attest function", e))?;
+                atsstore::inject_ats_functions(py, &globals)
+                    .map_err(|e| Error::context("failed to inject ATSStore functions", e))?;
             }
 
             // Inject schedule management functions if schedule client is available

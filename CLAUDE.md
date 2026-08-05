@@ -6,6 +6,8 @@ Git deps on teranos/QNTX: `qntx-grpc` (proto types), `qntx-proto` (Struct/JSON h
 
 Single binary, multiple instances via Nix wrapping (`--name`, `withPackages`).
 
-Handler discovery: queries ATS for `predicate=handler, context={name}`, keeps newest on duplicate subjects. `@watch('pred', context='ctx')` registers watchers at init. `@schedule(every=N)` registers periodic execution via Pulse. Python builtins: `attest()`, `pause_schedule(id)`, `resume_schedule(id)`, `delete_schedule(id)`, `fetch(url)`.
+Handler discovery: queries ATS for `predicate=handler, context={name}`, keeps newest on duplicate subjects. `@watch('pred', context='ctx')` registers watchers at init. `@schedule(every=N)` registers periodic execution via Pulse. Python builtins: `attest()`, `last()`, `pause_schedule(id)`, `resume_schedule(id)`, `delete_schedule(id)`, `fetch(url)`.
+
+`last(subjects, predicates, contexts, actors)` returns the newest matching attestation or `None`. It is the only way a handler recovers state across a hot reload — reload re-executes the module, so module-level variables are not history.
 
 Version in `Cargo.toml` — bump on every code change.

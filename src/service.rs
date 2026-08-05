@@ -1024,4 +1024,61 @@ except RuntimeError as e:
         assert!(response.success);
         assert!(response.stdout.contains("Got expected error"));
     }
+
+    #[tokio::test]
+    async fn test_last_function_available() {
+        let service = PythonPluginService::new("python").unwrap();
+
+        let body = serde_json::json!({
+            "content": "print('last is callable:', callable(last))",
+            "timeout_secs": 5
+        });
+
+        let result = service.handlers.handle_execute(body).await.unwrap();
+
+        #[derive(Deserialize)]
+        struct ExecutionResponse {
+            success: bool,
+            stdout: String,
+            error: Option<String>,
+        }
+
+        let response: ExecutionResponse = serde_json::from_slice(&result.body).unwrap();
+        assert!(
+            response.success,
+            "Expected success, got error: {:?}",
+            response.error
+        );
+        assert!(response.stdout.contains("last is callable: True"));
+    }
+
+    /// An unreadable store must raise, never return None — None means "no history",
+    /// and a guard that cannot tell those apart fires "changed" on every run.
+    #[tokio::test]
+    async fn test_last_without_atsstore_raises_rather_than_returning_none() {
+        let service = PythonPluginService::new("python").unwrap();
+
+        let body = serde_json::json!({
+            "content": r#"
+try:
+    got = last(predicates=['observed'])
+    print('ERROR: should have raised, returned', repr(got))
+except RuntimeError as e:
+    print('Got expected error:', str(e))
+"#,
+            "timeout_secs": 5
+        });
+
+        let result = service.handlers.handle_execute(body).await.unwrap();
+
+        #[derive(Deserialize)]
+        struct ExecutionResponse {
+            success: bool,
+            stdout: String,
+        }
+
+        let response: ExecutionResponse = serde_json::from_slice(&result.body).unwrap();
+        assert!(response.success);
+        assert!(response.stdout.contains("Got expected error"));
+    }
 }

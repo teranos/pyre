@@ -14,6 +14,7 @@ See [ADR-022](https://github.com/teranos/QNTX/blob/main/docs/adr/ADR-022-python-
 
 - Executes Python code, expressions, and files via gRPC/HTTP
 - `attest()` built-in for creating attestations from Python
+- `last()` built-in for reading the newest matching attestation back — a handler's only durable memory across hot reload
 - Discovers handlers from ATS (predicate=handler, context=plugin-name)
 - `@watch` decorator — handlers fire automatically on upstream attestations
 - Package management via uv with pip fallback
