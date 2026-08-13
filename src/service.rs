@@ -675,6 +675,52 @@ impl PythonService for PythonPluginService {
 
 // Helper methods for PythonPluginService
 impl PythonPluginService {
+    /// Offer Pulse every `@schedule` the reloaded code declares. A reload never
+    /// reaches the path Initialize uses, so a handler stoked after startup had
+    /// code and no clock. Creation is idempotent, so this offers all of them.
+    fn declare_schedules(&self, handlers: &HashMap<String, String>) {
+        let client = {
+            let state = self.handlers.state.read();
+            state.schedule_client.clone()
+        };
+
+        for (handler_name, code) in handlers {
+            let extracted = {
+                let state = self.handlers.state.read();
+                state.engine.extract_schedules(code)
+            };
+
+            let schedules = match extracted {
+                Ok(s) => s,
+                Err(e) => {
+                    error!("handler {handler_name}: cannot read its schedules: {e}");
+                    continue;
+                }
+            };
+
+            for s in schedules {
+                // What core would have named it. Anything else creates a second
+                // schedule beside the declared one.
+                let name = format!("{}/{}.{}", self.name, self.name, handler_name);
+
+                let mut metadata = HashMap::new();
+                metadata.insert("plugin".to_string(), self.name.clone());
+                metadata.insert("description".to_string(), s.description.clone());
+
+                let guard = client.lock();
+                let Some(c) = guard.as_ref() else {
+                    error!("{name}: no schedule client, so it has no clock");
+                    continue;
+                };
+
+                match c.create(&name, s.interval_seconds, metadata) {
+                    Ok(id) => info!("Schedule: {name} every {}s ({id})", s.interval_seconds),
+                    Err(e) => error!("{name}: every {}s refused: {e}", s.interval_seconds),
+                }
+            }
+        }
+    }
+
     /// Hot-reload handler code from ATS store.
     ///
     /// Triggered by a watcher on predicate="handler" in our own context.
@@ -688,6 +734,8 @@ impl PythonPluginService {
 
         let new_handlers = self.discover_handlers_from_config(config).await;
         let count = new_handlers.len();
+
+        self.declare_schedules(&new_handlers);
 
         {
             let mut state = self.handlers.state.write();
