@@ -135,6 +135,55 @@ impl ScheduleClient {
         .map_err(|e| format!("thread panicked: {:?}", e))?
     }
 
+    /// The interval a standing schedule actually runs at.
+    /// Needed because create hands back what exists without changing it, so
+    /// the declared period and the running one can disagree silently.
+    pub fn interval_of(&self, schedule_id: &str) -> Result<i32, String> {
+        let endpoint = self.config.endpoint.clone();
+        let auth_token = self.config.auth_token.clone();
+        let schedule_id = schedule_id.to_string();
+
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("failed to create runtime: {}", e))?;
+
+            rt.block_on(async {
+                let endpoint_uri =
+                    if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+                        endpoint.clone()
+                    } else {
+                        format!("http://{}", endpoint)
+                    };
+
+                let channel = Channel::from_shared(endpoint_uri)
+                    .map_err(|e| format!("invalid endpoint: {}", e))?
+                    .connect()
+                    .await
+                    .map_err(|e| format!("connection failed: {}", e))?;
+
+                let resp = ScheduleServiceClient::new(channel)
+                    .get_schedule(qntx_proto::GetScheduleRequest {
+                        auth_token,
+                        schedule_id,
+                    })
+                    .await
+                    .map_err(|e| format!("gRPC error: {}", e))?
+                    .into_inner();
+
+                if !resp.success {
+                    return Err(resp.error);
+                }
+                resp.job
+                    .map(|j| j.interval_seconds)
+                    .ok_or_else(|| "schedule exists and carries no job".to_string())
+            })
+        })
+        .join()
+        .map_err(|e| format!("thread panicked: {:?}", e))?
+    }
+
     pub fn pause(&self, schedule_id: &str) -> Result<(), String> {
         let sid = schedule_id.to_string();
         self.call_schedule_rpc("pause", schedule_id, move |mut client, auth_token| async move {

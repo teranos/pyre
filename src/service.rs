@@ -713,9 +713,41 @@ impl PythonPluginService {
                     continue;
                 };
 
+                let id = match c.create(&name, s.interval_seconds, metadata.clone()) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        error!("{name}: every {}s refused: {e}", s.interval_seconds);
+                        continue;
+                    }
+                };
+
+                // Create hands back what already stands rather than changing
+                // it, so a period edited in the decorator lands nowhere unless
+                // the old schedule is taken away first.
+                let standing = match c.interval_of(&id) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("{name} ({id}): cannot read its interval: {e}");
+                        continue;
+                    }
+                };
+
+                if standing == s.interval_seconds {
+                    info!("Schedule: {name} every {}s ({id})", s.interval_seconds);
+                    continue;
+                }
+
+                if let Err(e) = c.delete(&id) {
+                    error!("{name}: still every {standing}s, {id} would not go: {e}");
+                    continue;
+                }
+
                 match c.create(&name, s.interval_seconds, metadata) {
-                    Ok(id) => info!("Schedule: {name} every {}s ({id})", s.interval_seconds),
-                    Err(e) => error!("{name}: every {}s refused: {e}", s.interval_seconds),
+                    Ok(new) => info!(
+                        "Schedule: {name} every {}s was {standing}s ({new})",
+                        s.interval_seconds
+                    ),
+                    Err(e) => error!("{name}: {standing}s taken away and nothing put back: {e}"),
                 }
             }
         }
