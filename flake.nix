@@ -56,6 +56,50 @@
           '';
         };
 
+        # DIRE — Development In Runtime Environments. pyre wrapped with its own
+        # Python environment: the shape capy and icpy each rebuilt from
+        # nothing. An output here, not a second flake, so it shares this lock.
+        direPython = pkgs.python313.withPackages (ps: with ps; [ requests ]);
+
+        direVersion = "0.1.0";
+
+        dire = pkgs.rustPlatform.buildRustPackage {
+          pname = "qntx-dire-plugin";
+          version = direVersion;
+          src = ./.;
+
+          QNTX_PLUGIN_VERSION = direVersion;
+
+          cargoLock = {
+            lockFile = ./Cargo.lock;
+            inherit outputHashes;
+          };
+
+          buildInputs = with pkgs; [ protobuf direPython openssl ];
+          nativeBuildInputs = with pkgs; [ pkg-config protobuf makeWrapper ];
+
+          QNTX_PROTO_DIR = "${qntx-src}/plugin/grpc/protocol";
+          PYO3_PYTHON = "${direPython}/bin/python3";
+
+          # The DIRE tests reach PyPI and the sandbox has no network. They run
+          # under `cargo test -- --include-ignored` in CI, which does.
+          doCheck = false;
+
+          postInstall = ''
+            mv $out/bin/pyre $out/bin/qntx-dire-plugin
+          '' + pkgs.lib.optionalString pkgs.stdenv.isLinux ''
+            patchelf --set-rpath "${pkgs.lib.makeLibraryPath [ direPython ]}:$(patchelf --print-rpath $out/bin/qntx-dire-plugin)" \
+              $out/bin/qntx-dire-plugin
+          '' + pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+            install_name_tool -add_rpath "${pkgs.lib.makeLibraryPath [ direPython ]}" \
+              $out/bin/qntx-dire-plugin
+          '' + ''
+            wrapProgram $out/bin/qntx-dire-plugin \
+              --prefix PYTHONPATH : "${direPython}/${direPython.sitePackages}" \
+              --add-flags "--name dire"
+          '';
+        };
+
         # Clippy check
         pyre-clippy = pkgs.rustPlatform.buildRustPackage {
           pname = "pyre-clippy";
@@ -98,6 +142,8 @@
         packages = {
           default = pyre;
           pyre = pyre;
+          dire = dire;
+          dire-python = direPython;
         };
 
         checks = {

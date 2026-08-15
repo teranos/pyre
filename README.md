@@ -130,7 +130,7 @@ Lists installed packages.
 
 ## DIRE — Development In Runtime Environments
 
-`dire/` is pyre wrapped with its own Python environment. It is the shape every
+`.#dire` is pyre wrapped with its own Python environment. It is the shape every
 consumer builds: `withPackages` for the modules you want pinned and owned, a
 `wrapProgram` that sets `PYTHONPATH` and a `--name`, one process per domain.
 
@@ -140,8 +140,13 @@ the interpreter `withPackages` produces has **no pip**, which is the exact
 configuration where package management used to fail silently.
 
 ```bash
-nix build ./dire
+nix build .#dire
 ```
+
+In your own repo this is a separate flake taking `pyre` as an input. Here it is
+an output of pyre's own flake so it shares these inputs and this lock; a second
+lock fetching the same QNTX pin a second way disagreed on its NAR hash and
+broke CI.
 
 The point of the environment is that it does not have to hold everything. What
 is baked in is pinned; what a handler needs later it asks for at runtime, and
