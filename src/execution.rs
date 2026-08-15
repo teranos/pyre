@@ -1008,4 +1008,89 @@ def periodic():
         assert_eq!(watchers[0].handler_fn, "on_data");
         assert_eq!(schedules[0].handler_fn, "periodic");
     }
+
+    // --- DIRE ---------------------------------------------------------------
+    // These reach PyPI on purpose. They catch a wheel resolving against the
+    // wrong interpreter, which no offline fixture can tell you.
+
+    fn dire_engine(name: &str) -> (PythonEngine, String) {
+        let site = std::env::temp_dir()
+            .join(format!("pyre-dire-{}-{}", name, std::process::id()))
+            .to_string_lossy()
+            .into_owned();
+        let _ = std::fs::remove_dir_all(&site);
+        let engine = PythonEngine::new().unwrap();
+        engine.initialize(Vec::new(), Some(site.clone())).unwrap();
+        (engine, site)
+    }
+
+    // The whole point: a module the interpreter was not built with, usable
+    // without rebuilding the interpreter.
+    #[test]
+    fn a_module_arrives_at_runtime_and_imports() {
+        let (engine, site) = dire_engine("arrives");
+        assert!(!engine.check_module("six"), "six was already present");
+
+        let outcome = engine.pip_install("six");
+        assert!(outcome.success, "{:?}", outcome.error);
+        assert!(engine.check_module("six"), "installed but not importable");
+
+        let _ = std::fs::remove_dir_all(&site);
+    }
+
+    // An install that did not happen must not answer like one that did. This
+    // returned success with a null error for as long as the endpoint existed.
+    #[test]
+    fn a_failed_install_is_reported_as_a_failure() {
+        let (engine, site) = dire_engine("failure");
+
+        let outcome = engine.pip_install("pyre-dire-no-such-package-xyzzy");
+        assert!(!outcome.success, "a missing package reported success");
+        assert!(outcome.error.is_some(), "failed with no error attached");
+
+        let _ = std::fs::remove_dir_all(&site);
+    }
+
+    // Pillow ships a wheel per architecture. Picking the wrong one does not
+    // raise, it ends the process, so this asserts the tag actually matched.
+    #[test]
+    fn an_extension_module_matches_the_running_interpreter() {
+        let (engine, site) = dire_engine("extension");
+
+        let outcome = engine.pip_install("Pillow");
+        assert!(outcome.success, "{:?}", outcome.error);
+
+        let wheel = outcome
+            .result
+            .as_ref()
+            .and_then(|v| v.get("wheel"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        assert!(wheel.ends_with(".whl"), "no wheel named: {:?}", outcome.result);
+        assert!(!wheel.contains("-any.whl"), "Pillow resolved to a pure wheel: {}", wheel);
+
+        let drawn = engine.execute(
+            "from PIL import Image, ImageDraw\n\
+             img = Image.new('RGBA', (64, 24), (0, 90, 90, 255))\n\
+             ImageDraw.Draw(img).text((2, 6), 'dire', fill=(255, 255, 255, 255))\n\
+             _result = img.size\n",
+            &ExecutionConfig::default(),
+        );
+        assert!(drawn.success, "{:?}", drawn.error);
+
+        let _ = std::fs::remove_dir_all(&site);
+    }
+
+    // Without a site directory there is nowhere to write, and saying so beats
+    // failing further in with a permission error about the Nix store.
+    #[test]
+    fn an_engine_with_nowhere_to_install_says_so() {
+        let engine = PythonEngine::new().unwrap();
+        engine.initialize(Vec::new(), None).unwrap();
+
+        let outcome = engine.pip_install("six");
+        assert!(!outcome.success);
+        assert!(outcome.error.unwrap().contains("site directory"));
+    }
 }

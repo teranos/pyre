@@ -33,6 +33,11 @@ jobs:
       - name: Run tests
         run: nix develop -c cargo test
 
+      # DIRE is pyre wrapped with its own Python environment, the shape every
+      # consumer builds. Building it here is what keeps the example true.
+      - name: Build dire
+        run: nix build --show-trace ./dire
+
       - name: Push to Cachix
         run: nix build --print-out-paths --no-link | cachix push qntx
 

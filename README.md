@@ -17,7 +17,8 @@ See [ADR-022](https://github.com/teranos/QNTX/blob/main/docs/adr/ADR-022-python-
 - `last()` built-in for reading the newest matching attestation back — a handler's only durable memory across hot reload
 - Discovers handlers from ATS (predicate=handler, context=plugin-name)
 - `@watch` decorator — handlers fire automatically on upstream attestations
-- Package management via uv with pip fallback
+- Installs a package at runtime, into a site directory the engine owns, with no
+  pip and no uv — see DIRE below
 - Captures stdout/stderr and variable extraction
 
 ## Building
@@ -96,11 +97,18 @@ Specialized instances use a Nix flake that wraps the same binary with a differen
 
 ### POST /uv/install
 
-Install a package (uv preferred, pip fallback).
+Resolve a wheel for the running interpreter and unpack it into the engine's
+site directory. No pip, no uv: pyre deploys as a Nix-wrapped interpreter that
+has neither, and a wheel is a zip the standard library can open.
 
 ```json
 {"package": "numpy"}
 ```
+
+A wheel that does not match the interpreter is refused rather than installed.
+Importing one built for another architecture ends the process instead of
+raising, and the handler-reload watcher then retries it until the plugin is
+gone. A failed install answers `success: false` with the reason attached.
 
 ### GET /uv/check
 
@@ -119,6 +127,26 @@ Check if a package is available.
 ### GET /modules
 
 Lists installed packages.
+
+## DIRE — Development In Runtime Environments
+
+`dire/` is pyre wrapped with its own Python environment. It is the shape every
+consumer builds: `withPackages` for the modules you want pinned and owned, a
+`wrapProgram` that sets `PYTHONPATH` and a `--name`, one process per domain.
+
+It ships here so the pattern comes with pyre rather than being rediscovered,
+and so CI builds it on both Linux and macOS. That matters more than it sounds:
+the interpreter `withPackages` produces has **no pip**, which is the exact
+configuration where package management used to fail silently.
+
+```bash
+nix build ./dire
+```
+
+The point of the environment is that it does not have to hold everything. What
+is baked in is pinned; what a handler needs later it asks for at runtime, and
+the plugin keeps running. If the DIRE tests are red, the runtime cannot take a
+module, and nothing built on top of it is worth debugging first.
 
 ## Architecture
 
