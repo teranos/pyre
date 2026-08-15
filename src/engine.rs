@@ -103,6 +103,11 @@ impl Default for ExecutionConfig {
 pub(crate) struct EngineState {
     pub initialized: bool,
     pub python_paths: Vec<String>,
+
+    /// Where a runtime-installed package lands. Distinct from python_paths
+    /// because those are read-only store paths under Nix, and a runtime
+    /// install needs somewhere it may actually write.
+    pub site_dir: Option<String>,
 }
 
 /// Python execution engine
@@ -118,16 +123,36 @@ impl PythonEngine {
             state: Arc::new(Mutex::new(EngineState {
                 initialized: false,
                 python_paths: Vec::new(),
+                site_dir: None,
             })),
         })
     }
 
+    /// Where runtime-installed packages live, if this engine has been given a
+    /// place to put them.
+    pub fn site_dir(&self) -> Option<String> {
+        self.state.lock().site_dir.clone()
+    }
+
     /// Initialize the Python interpreter with optional paths
-    pub fn initialize(&self, python_paths: Vec<String>) -> Result<(), Error> {
+    pub fn initialize(&self, python_paths: Vec<String>, site_dir: Option<String>) -> Result<(), Error> {
         let mut state = self.state.lock();
 
         if state.initialized {
             return Ok(());
+        }
+
+        // First on sys.path, so a package installed at runtime wins over one
+        // baked into the interpreter. Upgrading without a rebuild is the point.
+        let mut python_paths = python_paths;
+        if let Some(dir) = &site_dir {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                return Err(Error::context(
+                    format!("site dir '{}' could not be created, so nothing can be installed at runtime", dir),
+                    e,
+                ));
+            }
+            python_paths.insert(0, dir.clone());
         }
 
         // PyO3 auto-initializes Python, but we need to set up paths
@@ -156,6 +181,7 @@ impl PythonEngine {
 
         state.initialized = true;
         state.python_paths = python_paths;
+        state.site_dir = site_dir;
 
         Ok(())
     }

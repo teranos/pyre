@@ -302,7 +302,17 @@ impl DomainPluginService for PythonPluginService {
                 );
             }
 
-            if let Err(e) = state.engine.initialize(python_paths) {
+            // Named for the plugin, so two instances of pyre never install
+            // into each other. Overridable for hosts where /var/lib is not
+            // writable by whoever runs the plugin.
+            let site_dir = state
+                .config
+                .as_ref()
+                .and_then(|c| c.config.get("site_dir"))
+                .cloned()
+                .unwrap_or_else(|| format!("/var/lib/qntx/{}-site", self.name));
+
+            if let Err(e) = state.engine.initialize(python_paths, Some(site_dir)) {
                 error!("Failed to initialize Python engine: {}", e);
                 return Err(Status::internal(format!(
                     "Failed to initialize Python engine: {}",

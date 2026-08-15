@@ -543,49 +543,146 @@ class watch:
             .collect())
     }
 
-    /// Install a package using uv (preferred) or pip.
-    ///
-    /// Uses `uv pip install` if uv is available, falls back to pip via the
-    /// Python interpreter path from sysconfig (NOT sys.executable, which points
-    /// to the Rust binary in PyO3-embedded contexts).
+    /// Install a package into the engine's site directory, at runtime. A wheel
+    /// is a zip and the stdlib opens both, so this needs neither uv nor pip —
+    /// pyre deploys as a Nix-wrapped interpreter where both were dead.
     pub fn pip_install(&self, package: &str) -> ExecutionResult {
+        let Some(site) = self.site_dir() else {
+            return ExecutionResult {
+                success: false,
+                stdout: String::new(),
+                stderr: String::new(),
+                result: None,
+                error: Some(
+                    "no site directory: this engine was initialized without one, so a package has nowhere to land".to_string(),
+                ),
+                duration_ms: 0,
+                variables: std::collections::HashMap::new(),
+            };
+        };
+
         let code = format!(
-            r#"
-import subprocess
-import shutil
-
-package = "{}"
-
-# Prefer uv — fast, correct, no sys.executable issue
-uv = shutil.which("uv")
-if uv:
-    result = subprocess.run(
-        [uv, "pip", "install", "--system", package],
-        capture_output=True,
-        text=True,
-    )
-else:
-    # Fallback: resolve the actual Python interpreter path via sysconfig.
-    # sys.executable points to the Rust binary in PyO3, so we can't use it.
-    import sysconfig, os
-    python = os.path.join(sysconfig.get_path("scripts"), "python3")
-    result = subprocess.run(
-        [python, "-m", "pip", "install", package],
-        capture_output=True,
-        text=True,
-    )
-
-print(result.stdout)
-if result.stderr:
-    import sys
-    print(result.stderr, file=sys.stderr)
-_result = result.returncode == 0
-"#,
-            package.replace('"', r#"\""#)
+            "{}\n_result = _dire_install({:?}, {:?})\n",
+            DIRE_INSTALLER, package, site
         );
-        self.execute(&code, &ExecutionConfig::default())
+
+        let mut outcome = self.execute(&code, &ExecutionConfig::default());
+
+        // The snippet running is not the install succeeding. Reporting the one
+        // as the other is what made this look like it worked for years.
+        if outcome.success {
+            let field = |key: &str| {
+                outcome
+                    .result
+                    .as_ref()
+                    .and_then(|v| v.get(key))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null)
+            };
+            if !field("installed").as_bool().unwrap_or(false) {
+                let reason = field("error")
+                    .as_str()
+                    .map(String::from)
+                    .unwrap_or_else(|| "install failed without saying why".to_string());
+                outcome.success = false;
+                outcome.error = Some(reason);
+            }
+        }
+
+        outcome
     }
 }
+
+/// Resolves a wheel for the running interpreter and unpacks it. The platform
+/// check is load-bearing: importing another architecture's wheel takes the
+/// process down rather than raising, and the reload watcher then retries it.
+const DIRE_INSTALLER: &str = r#"
+def _dire_install(package, site):
+    import importlib, io, json, os, shutil, sys, sysconfig, urllib.request, zipfile
+
+    major, minor = sys.version_info[:2]
+    want_py = "cp%d%d" % (major, minor)
+    platform_tag = sysconfig.get_platform().replace("-", "_").replace(".", "_")
+    arch = platform_tag.rsplit("_", 1)[-1]
+
+    if sys.platform.startswith("linux"):
+        families = ("manylinux", "linux")
+    elif sys.platform == "darwin":
+        families = ("macosx",)
+    else:
+        families = ()
+
+    def rank(filename):
+        if not filename.endswith(".whl"):
+            return None
+        parts = filename[:-4].split("-")
+        if len(parts) < 5:
+            return None
+        pys, _abi, plats = parts[-3], parts[-2], parts[-1]
+        if want_py not in pys.split(".") and "py3" not in pys.split("."):
+            return None
+        if plats == "any":
+            return 1
+        for tag in plats.split("."):
+            if tag.endswith("_" + arch) and tag.startswith(families):
+                return 2
+        return None
+
+    try:
+        with urllib.request.urlopen(
+                "https://pypi.org/pypi/%s/json" % package, timeout=30) as response:
+            meta = json.load(response)
+    except Exception as exc:
+        return {"installed": False, "error": "pypi lookup failed: %s" % exc}
+
+    best = None
+    for entry in meta.get("urls", []):
+        score = rank(entry["filename"])
+        if score is not None and (best is None or score > best[0]):
+            best = (score, entry)
+
+    if best is None:
+        return {
+            "installed": False,
+            "error": "no wheel for %s matching %s on %s. Refusing rather than "
+                     "importing another architecture, which kills the plugin."
+                     % (package, want_py, platform_tag),
+        }
+
+    entry = best[1]
+    try:
+        with urllib.request.urlopen(entry["url"], timeout=120) as response:
+            blob = response.read()
+    except Exception as exc:
+        return {"installed": False, "error": "download failed: %s" % exc}
+
+    os.makedirs(site, exist_ok=True)
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(blob))
+        tops = sorted({n.split("/")[0] for n in archive.namelist() if "/" in n})
+        # Replace, never merge. A half-overwritten package is how one wheel's
+        # extension module ends up beside another's, and that is unimportable
+        # in the way that segfaults rather than raises.
+        for top in tops:
+            victim = os.path.join(site, top)
+            if os.path.isdir(victim):
+                shutil.rmtree(victim)
+        archive.extractall(site)
+    except Exception as exc:
+        return {"installed": False, "error": "unpack failed: %s" % exc}
+
+    if site not in sys.path:
+        sys.path.insert(0, site)
+    importlib.invalidate_caches()
+
+    return {
+        "installed": True,
+        "wheel": entry["filename"],
+        "site": site,
+        "bytes": len(blob),
+        "replaced": tops,
+    }
+"#;
 
 /// Format a Python error with full traceback for better debugging
 fn format_python_error(py: Python<'_>, err: &PyErr) -> String {
