@@ -19,7 +19,7 @@ use crate::proto::{
 };
 use crate::version::version;
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::Stream;
@@ -98,14 +98,17 @@ impl PythonPluginService {
 
         // Query ATS store for handler attestations
         // Filter: predicate="handler" AND context="python"
+        // Both, in one query. Results come back newest-first, so the first
+        // thing seen for a subject is the current truth about it: code means
+        // load, a fault means the last attempt to read it failed.
         let filter = AttestationFilter {
             subjects: vec![],
-            predicates: vec!["handler".to_string()],
+            predicates: vec!["handler".to_string(), "handler:faulted".to_string()],
             contexts: vec![self.name.clone()],
             actors: vec![],
             time_start: None,
             time_end: None,
-            limit: Some(100), // Limit to 100 handlers
+            limit: Some(200),
         };
 
         let request = GetAttestationsRequest {
@@ -149,24 +152,45 @@ impl PythonPluginService {
 
                     // Extract handler names and code from attestations
                     let mut handlers = HashMap::new();
+                    let mut settled: HashSet<String> = HashSet::new();
+
                     for attestation in response.attestations {
-                        if let Some(handler_name) = attestation.subjects.first() {
-                            // Extract Python code from attributes Struct
-                            if let Some(ref attrs_struct) = attestation.attributes {
-                                let attrs =
-                                    qntx_proto::serde_struct::struct_to_json_map(attrs_struct);
-                                if let Some(serde_json::Value::String(code)) = attrs.get("code") {
-                                    // Results are ordered newest-first; keep the newest version
-                                    handlers.entry(handler_name.clone()).or_insert_with(|| code.clone());
-                                } else {
-                                    warn!(
-                                        "Handler {} attributes missing 'code' field, skipping",
-                                        handler_name
-                                    );
-                                }
+                        let Some(handler_name) = attestation.subjects.first() else {
+                            continue;
+                        };
+                        // Newest-first, so the first word on a subject is the
+                        // last word, whichever predicate it came under.
+                        if settled.contains(handler_name) {
+                            continue;
+                        }
+
+                        if attestation
+                            .predicates
+                            .iter()
+                            .any(|p| p == "handler:faulted")
+                        {
+                            settled.insert(handler_name.clone());
+                            warn!(
+                                "Handler {} is faulted and will not be loaded — stoke it again to clear",
+                                handler_name
+                            );
+                            continue;
+                        }
+
+                        // Extract Python code from attributes Struct
+                        if let Some(ref attrs_struct) = attestation.attributes {
+                            let attrs = qntx_proto::serde_struct::struct_to_json_map(attrs_struct);
+                            if let Some(serde_json::Value::String(code)) = attrs.get("code") {
+                                settled.insert(handler_name.clone());
+                                handlers.insert(handler_name.clone(), code.clone());
                             } else {
-                                warn!("Handler {} has no attributes, skipping", handler_name);
+                                warn!(
+                                    "Handler {} attributes missing 'code' field, skipping",
+                                    handler_name
+                                );
                             }
+                        } else {
+                            warn!("Handler {} has no attributes, skipping", handler_name);
                         }
                     }
 
@@ -343,6 +367,7 @@ impl DomainPluginService for PythonPluginService {
         // Extract @watch and @schedule decorator metadata from discovered handlers
         let mut watchers = vec![];
         let mut schedules = vec![];
+        let mut faulted: Vec<(String, String)> = vec![];
         let mut sorted_handlers: Vec<_> = discovered_handlers.keys().collect();
         sorted_handlers.sort();
         for handler_name in &sorted_handlers {
@@ -351,12 +376,23 @@ impl DomainPluginService for PythonPluginService {
             if let Some(code) = discovered_handlers.get(*handler_name) {
                 let state = self.handlers.state.read();
 
-                // @watch decorators
-                // A handler whose decorators cannot be read registers nothing
-                // and looks like a handler that declared nothing. Say it.
-                let handler_watchers = state.engine.extract_watchers(code).map_err(|e| {
-                    Status::internal(format!("handler {handler_name}: {e}"))
-                })?;
+                // A handler whose decorators cannot be read is faulted, not
+                // fatal. Returning here failed Initialize for every handler,
+                // and QNTX then pruned every schedule the plugin ever declared.
+                let read = state
+                    .engine
+                    .extract_watchers(code)
+                    .and_then(|w| state.engine.extract_schedules(code).map(|s| (w, s)));
+
+                let (handler_watchers, handler_schedules) = match read {
+                    Ok(pair) => pair,
+                    Err(e) => {
+                        error!("handler {handler_name} did not load: {e}");
+                        faulted.push((handler_name.to_string(), e.to_string()));
+                        continue;
+                    }
+                };
+
                 for w in handler_watchers {
                     let watcher_id = format!("{}-{}", handler_name, w.handler_fn);
                     let watcher_handler = format!("{}.{}", self.name, handler_name);
@@ -375,10 +411,6 @@ impl DomainPluginService for PythonPluginService {
                     });
                 }
 
-                // @schedule decorators
-                let handler_schedules = state.engine.extract_schedules(code).map_err(|e| {
-                    Status::internal(format!("handler {handler_name}: {e}"))
-                })?;
                 for s in handler_schedules {
                     let schedule_handler = format!("{}.{}", self.name, handler_name);
                     info!(
@@ -395,6 +427,8 @@ impl DomainPluginService for PythonPluginService {
                 }
             }
         }
+
+        self.attest_faults(&faulted);
 
         // Register a watcher on handler attestations in our own context so that
         // attest.fish hot-deploys take effect without a plugin restart.
@@ -688,6 +722,47 @@ impl PythonPluginService {
     /// Offer Pulse every `@schedule` the reloaded code declares. A reload never
     /// reaches the path Initialize uses, so a handler stoked after startup had
     /// code and no clock. Creation is idempotent, so this offers all of them.
+    /// Put each unreadable handler where something other than the journal can
+    /// find it. A fault names the handler and why, in the plugin's own context,
+    /// so `predicate=handler:faulted` answers what `crowbar` used to.
+    fn attest_faults(&self, faulted: &[(String, String)]) {
+        if faulted.is_empty() {
+            return;
+        }
+
+        let client = {
+            let state = self.handlers.state.read();
+            state.ats_client.clone()
+        };
+
+        for (handler_name, reason) in faulted {
+            let mut attributes = HashMap::new();
+            attributes.insert("plugin".to_string(), self.name.clone().into());
+            attributes.insert("handler".to_string(), handler_name.clone().into());
+            attributes.insert("reason".to_string(), reason.clone().into());
+
+            let mut guard = client.lock();
+            let Some(c) = guard.as_mut() else {
+                error!("{handler_name} faulted and there is no ATS client to say so");
+                continue;
+            };
+
+            // The same subject the code is attested under, so "newest wins"
+            // decides whether this handler is loadable without comparing
+            // timestamps: a later stoke buries the fault by existing.
+            match c.create_attestation(
+                vec![handler_name.clone()],
+                vec!["handler:faulted".to_string()],
+                vec![self.name.clone()],
+                None,
+                Some(attributes),
+            ) {
+                Ok(_) => error!("handler {handler_name} faulted — attested"),
+                Err(e) => error!("{handler_name} faulted and the fault could not be attested: {e}"),
+            }
+        }
+    }
+
     fn declare_schedules(&self, handlers: &HashMap<String, String>) {
         let client = {
             let state = self.handlers.state.read();
