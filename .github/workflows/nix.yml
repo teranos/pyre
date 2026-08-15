@@ -30,8 +30,10 @@ jobs:
       - name: Build pyre
         run: nix build --show-trace
 
+      # --include-ignored is what runs DIRE. Those tests reach PyPI, so they
+      # cannot run inside `nix build`'s sandbox, and this step has network.
       - name: Run tests
-        run: nix develop -c cargo test
+        run: nix develop -c cargo test -- --include-ignored
 
       # DIRE is pyre wrapped with its own Python environment, the shape every
       # consumer builds. Building it here is what keeps the example true.

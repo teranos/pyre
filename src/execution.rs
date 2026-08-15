@@ -1027,6 +1027,7 @@ def periodic():
     // The whole point: a module the interpreter was not built with, usable
     // without rebuilding the interpreter.
     #[test]
+    #[ignore = "reaches PyPI; the Nix sandbox has no network"]
     fn a_module_arrives_at_runtime_and_imports() {
         let (engine, site) = dire_engine("arrives");
         assert!(!engine.check_module("six"), "six was already present");
@@ -1041,6 +1042,7 @@ def periodic():
     // An install that did not happen must not answer like one that did. This
     // returned success with a null error for as long as the endpoint existed.
     #[test]
+    #[ignore = "reaches PyPI; the Nix sandbox has no network"]
     fn a_failed_install_is_reported_as_a_failure() {
         let (engine, site) = dire_engine("failure");
 
@@ -1054,6 +1056,7 @@ def periodic():
     // Pillow ships a wheel per architecture. Picking the wrong one does not
     // raise, it ends the process, so this asserts the tag actually matched.
     #[test]
+    #[ignore = "reaches PyPI; the Nix sandbox has no network"]
     fn an_extension_module_matches_the_running_interpreter() {
         let (engine, site) = dire_engine("extension");
 
