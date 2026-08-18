@@ -19,6 +19,9 @@ thread_local! {
     static CURRENT_CLIENT: RefCell<Option<SharedAtsStoreClient>> = const { RefCell::new(None) };
     // Glyph ID for actor convention: when set, attest() defaults actor to "glyph:{id}"
     static CURRENT_GLYPH_ID: RefCell<Option<String>> = const { RefCell::new(None) };
+    // The handler whose code is running. The runtime knows this at the moment of
+    // the write, so attest() can name the handler without the handler saying so.
+    static CURRENT_HANDLER: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// ATSStore client configuration
@@ -48,6 +51,8 @@ pub enum AtsError {
     Transport { doing: &'static str, cause: String },
     /// The node answered, and refused.
     Refused { doing: &'static str, cause: String },
+    /// Nothing named a context: no handler in scope, and none passed.
+    Contextless { doing: &'static str },
 }
 
 impl std::fmt::Display for AtsError {
@@ -62,6 +67,11 @@ impl std::fmt::Display for AtsError {
             }
             Self::Transport { doing, cause } => write!(f, "{doing}: {cause}"),
             Self::Refused { doing, cause } => write!(f, "{doing}: refused: {cause}"),
+            Self::Contextless { doing } => write!(
+                f,
+                "{doing}: no context: this execution is not a discovered handler, \
+                 so there is no handler name to stand in — pass contexts=[...]"
+            ),
         }
     }
 }
@@ -344,15 +354,37 @@ pub fn set_current_glyph_id(glyph_id: Option<String>) {
     });
 }
 
+/// Name the handler whose code is about to run, and clear it after. Nothing that
+/// is not a discovered handler may inherit the last one's name.
+pub fn set_current_handler(handler: Option<String>) {
+    CURRENT_HANDLER.with(|h| {
+        *h.borrow_mut() = handler;
+    });
+}
+
+/// The `of` in "subject is predicate of context", with the handler's name in it —
+/// every handler in a plugin wrote the plugin's name and read back identical.
+fn contexts_for(written: Vec<String>, handler: Option<&str>) -> Vec<String> {
+    // What the handler wrote stays. `@watch(predicate, context=...)` matches on
+    // the context its upstream carries, so replacing it cuts every watcher wire.
+    let mut contexts = written;
+    if let Some(name) = handler {
+        if !contexts.iter().any(|c| c == name) {
+            contexts.push(name.to_string());
+        }
+    }
+    contexts
+}
+
 /// Python-callable attest function.
 /// Creates an attestation using the current thread's ATSStore client.
 #[pyfunction]
-#[pyo3(signature = (subjects, predicates, contexts, actors=None, attributes=None))]
+#[pyo3(signature = (subjects, predicates, contexts=None, actors=None, attributes=None))]
 pub fn attest(
     py: Python<'_>,
     subjects: Vec<String>,
     predicates: Vec<String>,
-    contexts: Vec<String>,
+    contexts: Option<Vec<String>>,
     actors: Option<Vec<String>>,
     attributes: Option<Bound<'_, PyDict>>,
 ) -> PyResult<PyObject> {
@@ -369,6 +401,14 @@ pub fn attest(
         }
         None => None,
     };
+
+    let handler = CURRENT_HANDLER.with(|h| h.borrow().clone());
+    let contexts = contexts_for(contexts.unwrap_or_default(), handler.as_deref());
+    if contexts.is_empty() {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            AtsError::Contextless { doing: "attest" }.to_string(),
+        ));
+    }
 
     // Default actors to "glyph:{id}" when glyph_id is set and user didn't pass explicit actors
     let actors = match actors {
@@ -550,6 +590,47 @@ mod tests {
     fn last_filter_asks_for_exactly_one_attestation() {
         let filter = last_filter(LastQuery::default());
         assert_eq!(filter.limit, Some(1));
+    }
+
+    /// "What did mp004_request_ad_renders file?" had no answer while every
+    /// handler in a plugin wrote the same context.
+    #[test]
+    fn a_handlers_name_becomes_the_context_it_writes_under() {
+        let contexts = contexts_for(Vec::new(), Some("mp004_request_ad_renders"));
+        assert_eq!(contexts, vec!["mp004_request_ad_renders".to_string()]);
+    }
+
+    /// A watcher matches on the context its upstream carries, so a context the
+    /// handler chose is a wire — taking it away disconnects whoever watched it.
+    #[test]
+    fn a_context_the_handler_chose_survives_beside_its_name() {
+        let contexts = contexts_for(vec!["my/ctx".to_string()], Some("render_ads"));
+        assert_eq!(
+            contexts,
+            vec!["my/ctx".to_string(), "render_ads".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_handler_that_already_names_itself_is_not_named_twice() {
+        let contexts = contexts_for(vec!["render_ads".to_string()], Some("render_ads"));
+        assert_eq!(contexts, vec!["render_ads".to_string()]);
+    }
+
+    /// The HTTP and gRPC doors carry code, not a handler, so there is no name to
+    /// lend and what was written is all there is.
+    #[test]
+    fn an_execution_that_is_not_a_handler_adds_nothing() {
+        let contexts = contexts_for(vec!["my/ctx".to_string()], None);
+        assert_eq!(contexts, vec!["my/ctx".to_string()]);
+        assert!(contexts_for(Vec::new(), None).is_empty());
+    }
+
+    /// An empty context is not a context, and the caller needs to know what to do.
+    #[test]
+    fn a_contextless_write_says_what_to_pass() {
+        let e = AtsError::Contextless { doing: "attest" };
+        assert!(e.to_string().contains("contexts=[...]"));
     }
 
     #[test]

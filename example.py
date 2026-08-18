@@ -4,7 +4,8 @@
 #   - @watch(predicate, context=...) — fire on upstream attestations
 #   - @schedule(every=N) — run periodically every N seconds
 #   - upstream — the triggering attestation payload (dict or None)
-#   - attest() — create downstream attestations
+#   - attest() — create downstream attestations. The runtime adds this handler's
+#     name to contexts; anything passed here is kept beside it
 #   - pause_schedule(id) — pause a Pulse schedule
 #   - resume_schedule(id) — resume a paused schedule
 #   - delete_schedule(id) — soft-delete a schedule
