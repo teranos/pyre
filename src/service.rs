@@ -1010,8 +1010,11 @@ impl PythonPluginService {
             ..Default::default()
         };
 
+        // The runtime knows which handler this is, so attest() can say so and no
+        // handler has to pass its own name.
         let result = {
             let state = self.handlers.state.read();
+            crate::atsstore::set_current_handler(Some(handler_key.to_string()));
             crate::schedulestore::set_current_client(state.schedule_client.clone());
             crate::fetchstore::set_current_client(state.fetch_client.clone());
             let r = state.engine.execute_with_ats(
@@ -1022,6 +1025,7 @@ impl PythonPluginService {
             );
             crate::fetchstore::clear_current_client();
             crate::schedulestore::clear_current_client();
+            crate::atsstore::set_current_handler(None);
             r
         };
 
@@ -1183,6 +1187,70 @@ except RuntimeError as e:
         let response: ExecutionResponse = serde_json::from_slice(&result.body).unwrap();
         assert!(response.success);
         assert!(response.stdout.contains("Got expected error"));
+    }
+
+    /// Proves the name reaches Python: with a handler in scope the write gets
+    /// past the context check and fails on the store instead.
+    #[tokio::test]
+    async fn a_handler_supplies_the_context_its_code_never_passed() {
+        let service = PythonPluginService::new("pyre").unwrap();
+        atsstore::set_current_handler(Some("mp004_request_ad_renders".to_string()));
+
+        let body = serde_json::json!({
+            "content": r#"
+try:
+    attest(['ad:7'], ['render:requested'])
+    print('ERROR: should have raised')
+except RuntimeError as e:
+    print('raised:', str(e))
+"#,
+            "timeout_secs": 5
+        });
+
+        let result = service.handlers.handle_execute(body).await.unwrap();
+        atsstore::set_current_handler(None);
+
+        #[derive(Deserialize)]
+        struct ExecutionResponse {
+            success: bool,
+            stdout: String,
+        }
+
+        let response: ExecutionResponse = serde_json::from_slice(&result.body).unwrap();
+        assert!(response.success);
+        assert!(response.stdout.contains("not initialized"), "{}", response.stdout);
+        assert!(!response.stdout.contains("no context"), "{}", response.stdout);
+    }
+
+    /// The HTTP door is not a handler, so it has no name to lend. Writing an
+    /// empty context instead would put the attestation nowhere.
+    #[tokio::test]
+    async fn a_write_with_no_handler_and_no_context_says_so() {
+        let service = PythonPluginService::new("pyre").unwrap();
+        atsstore::set_current_handler(None);
+
+        let body = serde_json::json!({
+            "content": r#"
+try:
+    attest(['ad:7'], ['render:requested'])
+    print('ERROR: should have raised')
+except RuntimeError as e:
+    print('raised:', str(e))
+"#,
+            "timeout_secs": 5
+        });
+
+        let result = service.handlers.handle_execute(body).await.unwrap();
+
+        #[derive(Deserialize)]
+        struct ExecutionResponse {
+            success: bool,
+            stdout: String,
+        }
+
+        let response: ExecutionResponse = serde_json::from_slice(&result.body).unwrap();
+        assert!(response.success);
+        assert!(response.stdout.contains("no context"), "{}", response.stdout);
     }
 
     #[tokio::test]

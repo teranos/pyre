@@ -8,6 +8,8 @@ Single binary, multiple instances via Nix wrapping (`--name`, `withPackages`).
 
 Handler discovery: queries ATS for `predicate=handler, context={name}`, keeps newest on duplicate subjects. `@watch('pred', context='ctx')` registers watchers at init. `@schedule(every=N)` registers periodic execution via Pulse. Python builtins: `attest()`, `last()`, `pause_schedule(id)`, `resume_schedule(id)`, `delete_schedule(id)`, `fetch(url)`.
 
+`attest()` stamps the executing handler's name into `contexts` — set on dispatch in `execute_discovered_handler_job`, read from a thread-local at the write. Contexts the handler passes are kept beside it, because `@watch(predicate, context=...)` matches on them. Outside a discovered handler there is no name, so `contexts` must be passed or the write raises.
+
 `last(subjects, predicates, contexts, actors)` returns the newest matching attestation or `None`. It is the only way a handler recovers state across a hot reload — reload re-executes the module, so module-level variables are not history.
 
 Version in `Cargo.toml` — bump on every code change.
