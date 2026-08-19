@@ -373,9 +373,11 @@ class schedule:
     }
 
     /// A script as Python must receive it: decorators stubbed, entry point
-    /// called. Returns the code unchanged when nothing is decorated, so a
-    /// plain snippet still runs.
+    /// called. A module that defines `main` and is fired by nothing is asking
+    /// to be run, and the guard leaves a plain snippet without one untouched.
     pub fn prepared(&self, code: &str) -> Result<String, String> {
+        const MAIN: &str = "if callable(globals().get('main')):\n    main()\n";
+
         const STUBS: &str = concat!(
             "class handler:\n",
             "    def __init__(self, description=None): pass\n",
@@ -419,9 +421,12 @@ class schedule:
             Err(e) if claims_decorator => return Err(e),
             Err(_) => return Ok(code.to_string()),
         }
-        Ok(code.to_string())
+        Ok(format!("{code}\n{MAIN}"))
     }
 
+    /// `def main` is the way into a script no trigger fires. @handler is still
+    /// read, because handlers attested before it cannot be rewritten in place,
+    /// and it never carried anything a name does not.
     pub fn extract_handler(&self, code: &str) -> Result<Option<String>, String> {
         let preamble = r#"
 _qntx_handler = []
@@ -798,11 +803,45 @@ mod tests {
         assert_eq!(result.stdout.trim(), "ran");
     }
 
+    // The guard goes on the end of every undecorated script, so what must hold
+    // is that a snippet without a main runs exactly as it was written.
     #[test]
     fn an_undecorated_script_is_left_alone() {
         let engine = PythonEngine::new().unwrap();
         let plain = "print('plain')\n";
-        assert_eq!(engine.prepared(plain).unwrap(), plain);
+
+        let ready = engine.prepared(plain).unwrap();
+        let result = engine.execute(&ready, &ExecutionConfig::default());
+
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(result.stdout.trim(), "plain");
+    }
+
+    // The way in for a handler nothing fires, and the reason @handler has no
+    // job left: def main says the same thing in Python's own words.
+    #[test]
+    fn a_module_that_defines_main_is_run_by_it() {
+        let engine = PythonEngine::new().unwrap();
+        let script = "def main():\n    print('ran')\n";
+
+        let ready = engine.prepared(script).unwrap();
+        let result = engine.execute(&ready, &ExecutionConfig::default());
+
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(result.stdout.trim(), "ran");
+    }
+
+    // A module that defines both is fired by its trigger, once.
+    #[test]
+    fn a_scheduled_module_is_not_run_twice_by_main() {
+        let engine = PythonEngine::new().unwrap();
+        let script = "@schedule(every=60)\ndef tick():\n    print('tick')\n\ndef main():\n    print('main')\n";
+
+        let ready = engine.prepared(script).unwrap();
+        let result = engine.execute(&ready, &ExecutionConfig::default());
+
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(result.stdout.trim(), "tick");
     }
 
     #[test]
