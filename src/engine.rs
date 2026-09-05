@@ -114,17 +114,28 @@ pub(crate) struct EngineState {
 pub struct PythonEngine {
     /// Shared state for the interpreter
     pub(crate) state: Arc<Mutex<EngineState>>,
+    /// Read once, here. Health asks for it every ten seconds, and a running
+    /// handler holds the GIL for as long as it runs; a Health that took the
+    /// GIL to answer waited on the handler, and the node shot the plugin for it.
+    version: String,
 }
 
 impl PythonEngine {
     /// Create a new Python engine
     pub fn new() -> Result<Self, Error> {
+        let version = Python::with_gil(|py| {
+            let sys = py.import("sys").ok();
+            sys.and_then(|s| s.getattr("version").ok())
+                .and_then(|v| v.extract().ok())
+                .unwrap_or_else(|| "unknown".to_string())
+        });
         Ok(Self {
             state: Arc::new(Mutex::new(EngineState {
                 initialized: false,
                 python_paths: Vec::new(),
                 site_dir: None,
             })),
+            version,
         })
     }
 
@@ -193,12 +204,7 @@ impl PythonEngine {
 
     /// Get Python version info
     pub fn python_version(&self) -> String {
-        Python::with_gil(|py| {
-            let sys = py.import("sys").ok();
-            sys.and_then(|s| s.getattr("version").ok())
-                .and_then(|v| v.extract().ok())
-                .unwrap_or_else(|| "unknown".to_string())
-        })
+        self.version.clone()
     }
 
     /// List installed packages (name==version) via importlib.metadata

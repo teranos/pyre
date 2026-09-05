@@ -419,21 +419,26 @@ pub fn attest(
         }
     };
 
-    // Get the current client from thread-local storage
-    let result = CURRENT_CLIENT.with(|c| {
-        let client_opt = c.borrow();
-        match client_opt.as_ref() {
-            Some(shared_client) => {
-                let mut guard = shared_client.lock();
-                match guard.as_mut() {
-                    Some(client) => {
-                        client.create_attestation(subjects, predicates, contexts, actors, attrs)
+    // The round trip to the node happens without the GIL. Python's own I/O
+    // lets go of it while it waits; a Rust join() does not, so without this
+    // every write pinned the interpreter for the whole trip, and Health, which
+    // is one more thing wanting the GIL, missed its deadline behind it.
+    let result = py.allow_threads(|| {
+        CURRENT_CLIENT.with(|c| {
+            let client_opt = c.borrow();
+            match client_opt.as_ref() {
+                Some(shared_client) => {
+                    let mut guard = shared_client.lock();
+                    match guard.as_mut() {
+                        Some(client) => {
+                            client.create_attestation(subjects, predicates, contexts, actors, attrs)
+                        }
+                        None => Err(AtsError::NotInitialized { doing: "attest" }),
                     }
-                    None => Err(AtsError::NotInitialized { doing: "attest" }),
                 }
+                None => Err(AtsError::NoClient { doing: "attest" }),
             }
-            None => Err(AtsError::NoClient { doing: "attest" }),
-        }
+        })
     });
 
     match result {
@@ -470,18 +475,21 @@ pub fn last(
         actors: actors.unwrap_or_default(),
     };
 
-    let result = CURRENT_CLIENT.with(|c| {
-        let client_opt = c.borrow();
-        match client_opt.as_ref() {
-            Some(shared_client) => {
-                let mut guard = shared_client.lock();
-                match guard.as_mut() {
-                    Some(client) => client.last_attestation(query),
-                    None => Err(AtsError::NotInitialized { doing: "last" }),
+    // Same as attest: the wait is the node's, not the interpreter's.
+    let result = py.allow_threads(|| {
+        CURRENT_CLIENT.with(|c| {
+            let client_opt = c.borrow();
+            match client_opt.as_ref() {
+                Some(shared_client) => {
+                    let mut guard = shared_client.lock();
+                    match guard.as_mut() {
+                        Some(client) => client.last_attestation(query),
+                        None => Err(AtsError::NotInitialized { doing: "last" }),
+                    }
                 }
+                None => Err(AtsError::NoClient { doing: "last" }),
             }
-            None => Err(AtsError::NoClient { doing: "last" }),
-        }
+        })
     });
 
     match result {

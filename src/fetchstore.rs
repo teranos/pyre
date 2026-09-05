@@ -154,18 +154,22 @@ fn fetch(
         source: source.to_string(),
     };
 
-    let result = CURRENT_CLIENT.with(|c| {
-        let client_opt = c.borrow();
-        match client_opt.as_ref() {
-            Some(shared) => {
-                let mut guard = shared.lock();
-                match guard.as_mut() {
-                    Some(client) => client.fetch(&url, attest),
-                    None => Err("Fetch client not initialized".to_string()),
+    // A fetch waits on the node and on whatever the node fetches. Neither wait
+    // is the interpreter's, so the GIL is let go for it; see atsstore::attest.
+    let result = py.allow_threads(|| {
+        CURRENT_CLIENT.with(|c| {
+            let client_opt = c.borrow();
+            match client_opt.as_ref() {
+                Some(shared) => {
+                    let mut guard = shared.lock();
+                    match guard.as_mut() {
+                        Some(client) => client.fetch(&url, attest),
+                        None => Err("Fetch client not initialized".to_string()),
+                    }
                 }
+                None => Err("Fetch client not available in this context".to_string()),
             }
-            None => Err("Fetch client not available in this context".to_string()),
-        }
+        })
     });
 
     match result {
