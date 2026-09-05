@@ -57,6 +57,7 @@ impl PythonPluginService {
             schedule_client: crate::schedulestore::new_shared_client(),
             fetch_client: crate::fetchstore::new_shared_client(),
             discovered_handlers: HashMap::new(),
+            telemetry: None,
         }));
 
         Ok(Self {
@@ -255,6 +256,14 @@ impl DomainPluginService for PythonPluginService {
         // Clone config for later use after dropping lock
         let (state_config, py_version) = {
             let mut state = self.handlers.state.write();
+
+            // First, so that everything Initialize says from here on is shipped.
+            // A rebind on a second Initialize replaces the client; the old
+            // guard drops with the assignment and closes its pipe.
+            if let Some(dsn) = req.config.get(crate::telemetry::DSN_KEY).filter(|d| !d.is_empty()) {
+                let environment = req.config.get(crate::telemetry::ENVIRONMENT_KEY).map(String::as_str);
+                state.telemetry = Some(crate::telemetry::bind(&self.name, dsn, environment));
+            }
 
             // Store configuration
             state.config = Some(PluginConfig {
@@ -1012,6 +1021,9 @@ impl PythonPluginService {
 
         // The runtime knows which handler this is, so attest() can say so and no
         // handler has to pass its own name.
+        // Said before and after, because a handler that never came back is
+        // the one worth knowing about, and the file showed nothing of it.
+        info!(handler = handler_key, "Handler started");
         let result = {
             let state = self.handlers.state.read();
             crate::atsstore::set_current_handler(Some(handler_key.to_string()));
@@ -1031,6 +1043,7 @@ impl PythonPluginService {
 
         // Convert execution result to ExecuteJobResponse
         if result.success {
+            info!(handler = handler_key, duration_ms = result.duration_ms, "Handler finished");
             // Serialize result as JSON for the result field
             let result_json = serde_json::json!({
                 "stdout": result.stdout,
@@ -1055,6 +1068,14 @@ impl PythonPluginService {
         } else {
             // Execution failed
             let error_msg = result.error.unwrap_or_else(|| "Unknown error".to_string());
+            // The traceback is the whole of what a Python failure has to say,
+            // and until now it went back to the node and nowhere else.
+            error!(
+                handler = handler_key,
+                duration_ms = result.duration_ms,
+                error = %error_msg,
+                "Handler failed"
+            );
 
             Ok(Response::new(ExecuteJobResponse {
                 success: false,

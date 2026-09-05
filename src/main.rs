@@ -15,7 +15,7 @@ use tokio::signal;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::transport::Server;
 use tracing::{debug, info, warn, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing_subscriber::prelude::*;
 
 #[derive(clap::Parser, Debug)]
 #[command(name = "pyre")]
@@ -75,12 +75,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         _ => Level::INFO,
     };
 
-    FmtSubscriber::builder()
-        .with_max_level(log_level)
-        .with_target(false)
-        .with_thread_ids(false)
-        .with_file(false)
-        .with_line_number(false)
+    // The Sentry layer is installed now and bound to a client at Initialize,
+    // when the DSN arrives in the plugin's config. Before that it has nowhere
+    // to send and drops what it is handed, so a plugin with no DSN pays
+    // nothing.
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_target(false)
+                .with_thread_ids(false)
+                .with_file(false)
+                .with_line_number(false)
+                .with_filter(tracing_subscriber::filter::LevelFilter::from_level(log_level)),
+        )
+        .with(pyre::telemetry::layer())
         .init();
 
     debug!("Initializing Pyre v{}", pyre::version::version());
@@ -162,6 +170,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     info!("Plugin shutdown complete");
+    // The last lines are the ones that say why the process is ending. They
+    // are not in Sentry until the batch is drained, and a returning main does
+    // not wait for that.
+    pyre::telemetry::flush();
     Ok(())
 }
 

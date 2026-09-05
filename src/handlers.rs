@@ -33,6 +33,8 @@ pub(crate) struct PluginState {
     pub fetch_client: SharedFetchClient,
     /// Dynamically discovered handlers: handler_name -> Python code
     pub discovered_handlers: HashMap<String, String>,
+    /// Holds the Sentry client open. None until a DSN arrives in config.
+    pub telemetry: Option<sentry::ClientInitGuard>,
 }
 
 /// Handler context providing access to plugin state

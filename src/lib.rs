@@ -12,6 +12,7 @@
 //! - `service` - gRPC service implementation
 //! - `proto` - Generated protobuf types
 //! - `atsstore` - ATSStore gRPC client for attestation creation
+//! - `telemetry` - Where the log goes when nobody is on the box
 
 pub mod atsstore;
 pub mod config;
@@ -22,6 +23,7 @@ mod handlers;
 pub mod proto;
 pub mod schedulestore;
 pub mod service;
+pub mod telemetry;
 pub mod version;
 
 pub use config::PluginConfig;
