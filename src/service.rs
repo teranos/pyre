@@ -1119,6 +1119,61 @@ mod tests {
         assert_eq!(response.plugin_version, version());
     }
 
+    /// Initialize as the node sends it to a plugin with no services wired:
+    /// no ATS, so no handlers are discovered. site_dir is a scratch
+    /// directory, because the default under /var/lib is not writable here.
+    fn bare_initialize(site_dir: &std::path::Path) -> InitializeRequest {
+        let mut config = HashMap::new();
+        config.insert("site_dir".to_string(), site_dir.display().to_string());
+        InitializeRequest {
+            config,
+            ..Default::default()
+        }
+    }
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pyre-test-{}-{}", name, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // What capy and icpy get today: a plugin whose Python declares no LLM
+    // handler is no LLM provider, and the node never routes LLM calls to it.
+    #[tokio::test]
+    async fn a_plugin_that_declares_no_llm_handler_is_no_llm_provider() {
+        let service = PythonPluginService::new("python").unwrap();
+        let dir = scratch_dir("no-llm");
+        let response = service
+            .initialize(Request::new(bare_initialize(&dir)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!response.llm_provider);
+        assert!(response.python_provider);
+    }
+
+    // And a path it does not know is still a 404.
+    #[tokio::test]
+    async fn a_path_no_route_declares_is_a_404() {
+        let service = PythonPluginService::new("python").unwrap();
+        let dir = scratch_dir("no-route");
+        service
+            .initialize(Request::new(bare_initialize(&dir)))
+            .await
+            .unwrap();
+        let response = service
+            .handle_http(Request::new(HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/chat/completions".to_string(),
+                body: b"{}".to_vec(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.status_code, 404);
+    }
+
     #[tokio::test]
     async fn test_health_before_init() {
         let service = PythonPluginService::new("python").unwrap();
