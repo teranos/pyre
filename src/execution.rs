@@ -37,6 +37,32 @@ class route:
     def __call__(self, fn): return fn
 "#;
 
+/// Puts sys.stdout and sys.stderr behind routes, once: each writes to the
+/// capture the running thread set, else to the stream it replaced. Code that
+/// replaces sys.stdout itself is routed again on the next execution.
+const ROUTED_OUTPUT: &std::ffi::CStr = cr#"
+import sys as _pyre_sys, threading as _pyre_threading, io as _pyre_io
+class _PyreRoute(_pyre_io.TextIOBase):
+    def __init__(self, base):
+        self._pyre_base = base
+        self._pyre_local = _pyre_threading.local()
+    def _pyre_to(self):
+        return getattr(self._pyre_local, 'target', None) or self._pyre_base
+    def write(self, s):
+        return self._pyre_to().write(s)
+    def flush(self):
+        return self._pyre_to().flush()
+    def writable(self):
+        return True
+    @property
+    def encoding(self):
+        return getattr(self._pyre_to(), 'encoding', 'utf-8')
+for _pyre_name in ('stdout', 'stderr'):
+    _pyre_now = getattr(_pyre_sys, _pyre_name)
+    if not hasattr(_pyre_now, '_pyre_local'):
+        setattr(_pyre_sys, _pyre_name, _PyreRoute(_pyre_now))
+"#;
+
 /// Maximum length for captured variable values before truncation
 const MAX_VARIABLE_LENGTH: usize = 1000;
 
@@ -121,19 +147,27 @@ impl PythonEngine {
                 .call_method0("StringIO")
                 .map_err(|e| Error::context("failed to create stderr StringIO object", e))?;
 
-            // Save original stdout/stderr
-            let original_stdout = sys
+            // Output is captured per thread: sys.stdout and sys.stderr are
+            // routes that write to this thread's capture while it runs, and
+            // to the stream they replaced otherwise. Swapping sys.stdout
+            // itself gave one execution's prints to another running at once,
+            // and left a finished capture in place when two overlapped.
+            py.run(ROUTED_OUTPUT, None, None)
+                .map_err(|e| Error::context("failed to route sys.stdout and sys.stderr", e))?;
+            let out_local = sys
                 .getattr("stdout")
-                .map_err(|e| Error::context("failed to get original sys.stdout", e))?;
-            let original_stderr = sys
+                .and_then(|s| s.getattr("_pyre_local"))
+                .map_err(|e| Error::context("sys.stdout is not pyre's route", e))?;
+            let err_local = sys
                 .getattr("stderr")
-                .map_err(|e| Error::context("failed to get original sys.stderr", e))?;
-
-            // Redirect stdout/stderr
-            sys.setattr("stdout", &stdout_capture)
-                .map_err(|e| Error::context("failed to redirect sys.stdout to StringIO", e))?;
-            sys.setattr("stderr", &stderr_capture)
-                .map_err(|e| Error::context("failed to redirect sys.stderr to StringIO", e))?;
+                .and_then(|s| s.getattr("_pyre_local"))
+                .map_err(|e| Error::context("sys.stderr is not pyre's route", e))?;
+            out_local
+                .setattr("target", &stdout_capture)
+                .map_err(|e| Error::context("failed to capture this thread's stdout", e))?;
+            err_local
+                .setattr("target", &stderr_capture)
+                .map_err(|e| Error::context("failed to capture this thread's stderr", e))?;
 
             // Create execution globals
             let globals = PyDict::new(py);
@@ -209,9 +243,9 @@ impl PythonEngine {
             // Execute the code using py.run
             let exec_result = py.run(code_cstr.as_c_str(), Some(&globals), None);
 
-            // Restore stdout/stderr
-            let _ = sys.setattr("stdout", original_stdout);
-            let _ = sys.setattr("stderr", original_stderr);
+            // This thread's output goes where it went before it ran.
+            let _ = out_local.setattr("target", py.None());
+            let _ = err_local.setattr("target", py.None());
 
             // Get captured output
             let stdout: String = stdout_capture
@@ -1251,6 +1285,31 @@ mod tests {
         assert_eq!(waited[0], 42);
         assert!(waited[1].as_f64().unwrap() < 1.0);
         assert!(during_busy > 0, "the loop never ran in 500 ms of a busy handler");
+    }
+
+    // Two executions at once, on two threads, each waiting while the other
+    // prints: each captures its own output and nothing of the other's. A
+    // declared call runs on a blocking thread of its own, so executions
+    // overlap whenever one waits, as one waiting on otari does.
+    #[test]
+    fn executions_at_once_capture_their_own_output() {
+        let engine = std::sync::Arc::new(PythonEngine::new().unwrap());
+        let script = |me: &str| {
+            format!(
+                "import time\nfor i in range(20):\n    print('{me}')\n    time.sleep(0.005)\n"
+            )
+        };
+        let run = |me: &'static str| {
+            let engine = engine.clone();
+            let code = script(me);
+            std::thread::spawn(move || engine.execute(&code, &ExecutionConfig::default()))
+        };
+        let (a, b) = (run("a"), run("b"));
+        let (a, b) = (a.join().unwrap(), b.join().unwrap());
+
+        assert!(a.success && b.success, "{:?} {:?}", a.error, b.error);
+        assert_eq!(a.stdout, "a\n".repeat(20));
+        assert_eq!(b.stdout, "b\n".repeat(20));
     }
 
     #[test]
