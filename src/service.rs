@@ -366,6 +366,9 @@ impl DomainPluginService for PythonPluginService {
                 )));
             }
 
+            let config = state.config.as_ref().map(|c| c.config.clone()).unwrap_or_default();
+            state.engine.set_plugin_config(&config);
+
             state.initialized = true;
             let py_version = state.engine.python_version();
 
@@ -1745,6 +1748,25 @@ mod tests {
 
         assert_eq!(response.status_code, 500);
         assert!(String::from_utf8(response.body).unwrap().contains("upstream gone"));
+    }
+
+    // The record's config reaches the plugin's Python as the node handed it:
+    // a value the record names as ssm:/// or env: arrives resolved, so a
+    // handler needs no code and no credentials of its own for a secret.
+    #[tokio::test]
+    async fn a_handler_reads_its_plugins_config() {
+        let reads = "@llm()\ndef chat(request):\n    return {'content': plugin_config['upstream_key_name']}\n";
+        let service = PythonPluginService::new("otaripy").unwrap();
+        let dir = scratch_dir("config");
+        let mut request = bare_initialize(&dir);
+        request
+            .config
+            .insert("upstream_key_name".to_string(), "as the node resolved it".to_string());
+        request.ats_store_endpoint = ats_holding(&[("gateway", reads)]).await;
+        service.initialize(Request::new(request)).await.unwrap();
+
+        let answer = service.chat(Request::new(asked())).await.unwrap().into_inner();
+        assert_eq!(answer.content, "as the node resolved it");
     }
 
     #[tokio::test]

@@ -129,6 +129,9 @@ pub(crate) struct EngineState {
     /// because those are read-only store paths under Nix, and a runtime
     /// install needs somewhere it may actually write.
     pub site_dir: Option<String>,
+
+    /// The plugin's config from Initialize, read by Python as plugin_config.
+    pub plugin_config: HashMap<String, String>,
 }
 
 /// Python execution engine
@@ -155,6 +158,7 @@ impl PythonEngine {
                 initialized: false,
                 python_paths: Vec::new(),
                 site_dir: None,
+                plugin_config: HashMap::new(),
             })),
             version,
         })
@@ -219,6 +223,20 @@ impl PythonEngine {
     }
 
     /// Check if a Python module is available
+    /// Keep the plugin's config, as the node handed it at Initialize, for
+    /// every execution to read as the global `plugin_config`. The node has
+    /// resolved each ssm:/// and env: value before it arrives here. Kept on
+    /// the engine, not in the interpreter's builtins, so it is this plugin's
+    /// and no other engine's in the same process.
+    pub fn set_plugin_config(&self, config: &HashMap<String, String>) {
+        self.state.lock().plugin_config = config.clone();
+    }
+
+    /// The plugin's config as Initialize left it.
+    pub fn plugin_config(&self) -> HashMap<String, String> {
+        self.state.lock().plugin_config.clone()
+    }
+
     pub fn check_module(&self, module_name: &str) -> bool {
         Python::with_gil(|py| py.import(module_name).is_ok())
     }

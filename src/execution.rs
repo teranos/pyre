@@ -156,6 +156,17 @@ impl PythonEngine {
                 let _ = path_list.insert(0, path);
             }
 
+            // The plugin's config, as the node handed it at Initialize.
+            let plugin_config = PyDict::new(py);
+            for (key, value) in self.plugin_config() {
+                plugin_config.set_item(key, value).map_err(|e| {
+                    Error::context("failed to set an entry of plugin_config", e)
+                })?;
+            }
+            globals.set_item("plugin_config", plugin_config).map_err(|e| {
+                Error::context("failed to set plugin_config in execution globals", e)
+            })?;
+
             // Inject attest()/last() if an ATSStore client is available
             if inject_attest {
                 atsstore::inject_ats_functions(py, &globals)
@@ -1209,6 +1220,22 @@ mod tests {
         let r = engine.execute(busy, &ExecutionConfig::default());
         assert!(r.success, "{:?}", r.error);
         let during_busy = ticks(&engine) - before;
+
+        // Stopped and joined, so its ticks take no GIL from the other tests
+        // in this process: an execution captures output by swapping
+        // sys.stdout, and a thread switching in mid-run reads another's.
+        let r = engine.execute(
+            concat!(
+                "import sys\n",
+                "m = sys.modules.pop('_pyre_loop_probe')\n",
+                "m.loop.call_soon_threadsafe(m.loop.stop)\n",
+                "m.thread.join(timeout=5)\n",
+                "_result = m.thread.is_alive()\n",
+            ),
+            &ExecutionConfig::default(),
+        );
+        assert!(r.success, "{:?}", r.error);
+        assert_eq!(r.result, Some(serde_json::Value::Bool(false)));
 
         println!(
             "loop probe: {idle} ticks in 500 ms idle; a waiting handler got {} after {:.3} s; {during_busy} ticks in 500 ms of a busy handler",
