@@ -11,7 +11,9 @@ use crate::config::PluginConfig;
 use crate::engine::PythonEngine;
 use crate::handlers::{HandlerContext, PluginState};
 use crate::proto::{
-    domain_plugin_service_server::DomainPluginService, python_service_server::PythonService,
+    domain_plugin_service_server::DomainPluginService, llm_chat_chunk,
+    llm_service_server::LlmService, python_service_server::PythonService, LlmChatChunk,
+    LlmChatRequest, LlmChatResponse, LlmServed,
     service_endpoint, ConfigSchemaResponse, ElementDefResponse, Empty, ExecuteJobRequest,
     ExecuteJobResponse, HealthResponse, HttpHeader, HttpRequest, HttpResponse, InitializeRequest,
     InitializeResponse, MetadataResponse, PythonExecuteRequest, PythonExecuteResponse,
@@ -66,6 +68,8 @@ impl PythonPluginService {
             schedule_client: crate::schedulestore::new_shared_client(),
             fetch_client: crate::fetchstore::new_shared_client(),
             discovered_handlers: HashMap::new(),
+            llm_handler: None,
+            routes: vec![],
             telemetry: None,
         }));
 
@@ -377,6 +381,7 @@ impl DomainPluginService for PythonPluginService {
             let mut state = self.handlers.state.write();
             state.discovered_handlers = discovered_handlers.clone();
         }
+        let mut faulted = self.declare(&discovered_handlers);
 
         // Announce async handler capabilities
         // Start with built-in handlers
@@ -385,7 +390,6 @@ impl DomainPluginService for PythonPluginService {
         // Extract @watch and @schedule decorator metadata from discovered handlers
         let mut watchers = vec![];
         let mut schedules = vec![];
-        let mut faulted: Vec<(String, String)> = vec![];
         let mut sorted_handlers: Vec<_> = discovered_handlers.keys().collect();
         sorted_handlers.sort();
         for handler_name in &sorted_handlers {
@@ -734,6 +738,98 @@ impl PythonPluginService {
     /// Put each unreadable handler where something other than the journal can
     /// find it. A fault names the handler and why, in the plugin's own context,
     /// so `predicate=handler:faulted` answers what `crowbar` used to.
+    /// Read what each handler declares it serves, and keep it: the one @llm
+    /// function, and every @route. A handler whose declarations cannot be
+    /// read, or that declares a second @llm, is faulted and serves nothing.
+    fn declare(&self, handlers: &HashMap<String, String>) -> Vec<(String, String)> {
+        let mut faulted = vec![];
+        let mut llm_handler: Option<(String, String)> = None;
+        let mut routes = vec![];
+        let mut names: Vec<_> = handlers.keys().collect();
+        names.sort();
+        for name in names {
+            let read = {
+                let state = self.handlers.state.read();
+                state.engine.extract_declarations(&handlers[name])
+            };
+            let declared = match read {
+                Ok(d) => d,
+                Err(e) => {
+                    error!("handler {name} did not load: {e}");
+                    faulted.push((name.clone(), e));
+                    continue;
+                }
+            };
+            if let Some(function) = declared.llm {
+                if let Some((first, _)) = &llm_handler {
+                    let e = format!(
+                        "{first} answers the node's LLM calls already, and a plugin has one @llm function"
+                    );
+                    error!("handler {name} did not load: {e}");
+                    faulted.push((name.clone(), e));
+                    continue;
+                }
+                info!("LLM: {}.{} answers the node's LLM calls", name, function);
+                llm_handler = Some((name.clone(), function));
+            }
+            for route in declared.routes {
+                info!("Route: {} {} via {}.{}", route.method, route.path, name, route.handler_fn);
+                routes.push((route, name.clone()));
+            }
+        }
+        let mut state = self.handlers.state.write();
+        state.llm_handler = llm_handler;
+        state.routes = routes;
+        faulted
+    }
+
+    /// Call a function a handler declares, off the async workers: a call
+    /// holds the interpreter for as long as the function runs.
+    async fn call_declared(
+        &self,
+        handler: String,
+        function: String,
+        argument: serde_json::Value,
+    ) -> Result<serde_json::Value, Status> {
+        let state = self.handlers.state.clone();
+        tokio::task::spawn_blocking(move || {
+            let state = state.read();
+            let code = state.discovered_handlers.get(&handler).cloned().ok_or_else(|| {
+                Status::failed_precondition(format!("handler {handler} is no longer discovered"))
+            })?;
+            crate::atsstore::set_current_handler(Some(handler.clone()));
+            crate::schedulestore::set_current_client(state.schedule_client.clone());
+            crate::fetchstore::set_current_client(state.fetch_client.clone());
+            let answered = state.engine.call_declared(
+                &code,
+                &function,
+                &argument,
+                Some(state.ats_client.clone()),
+            );
+            crate::fetchstore::clear_current_client();
+            crate::schedulestore::clear_current_client();
+            crate::atsstore::set_current_handler(None);
+            answered.map_err(|e| {
+                error!(handler = handler.as_str(), error = %e, "Declared function failed");
+                Status::internal(format!("{handler}.{function} failed: {e}"))
+            })
+        })
+        .await
+        .map_err(|e| Status::internal(format!("the call did not finish: {e}")))?
+    }
+
+    /// The node's LLM call, answered by the @llm function.
+    async fn answer_llm(&self, request: LlmChatRequest) -> Result<LlmChatResponse, Status> {
+        let declared = self.handlers.state.read().llm_handler.clone();
+        let (handler, function) = declared.ok_or_else(|| {
+            Status::unimplemented(format!("{} declares no @llm function", self.name))
+        })?;
+        let argument = serde_json::to_value(&request)
+            .map_err(|e| Status::internal(format!("the request did not serialize: {e}")))?;
+        let answer = self.call_declared(handler, function, argument).await?;
+        llm_answer(&answer)
+    }
+
     fn attest_faults(&self, faulted: &[(String, String)]) {
         if faulted.is_empty() {
             return;
@@ -865,8 +961,10 @@ impl PythonPluginService {
 
         {
             let mut state = self.handlers.state.write();
-            state.discovered_handlers = new_handlers;
+            state.discovered_handlers = new_handlers.clone();
         }
+        let faulted = self.declare(&new_handlers);
+        self.attest_faults(&faulted);
 
         info!("Hot-reloaded {} handler(s) from ATS store", count);
 
@@ -1086,6 +1184,99 @@ impl PythonPluginService {
     }
 }
 
+/// The status a refusal the @llm function returned names, by its gRPC name.
+fn refused(error: &serde_json::Value) -> Status {
+    let message = error["message"].as_str().unwrap_or_default().to_string();
+    match error["code"].as_str().unwrap_or_default() {
+        "INVALID_ARGUMENT" => Status::invalid_argument(message),
+        "UNAUTHENTICATED" => Status::unauthenticated(message),
+        "PERMISSION_DENIED" => Status::permission_denied(message),
+        "NOT_FOUND" => Status::not_found(message),
+        "FAILED_PRECONDITION" => Status::failed_precondition(message),
+        "RESOURCE_EXHAUSTED" => Status::resource_exhausted(message),
+        "UNAVAILABLE" => Status::unavailable(message),
+        "ABORTED" => Status::aborted(message),
+        "DEADLINE_EXCEEDED" => Status::deadline_exceeded(message),
+        other => Status::internal(format!("refused with code {other:?}: {message}")),
+    }
+}
+
+fn text(v: &serde_json::Value, key: &str) -> String {
+    v[key].as_str().unwrap_or_default().to_string()
+}
+
+fn count(v: &serde_json::Value, key: &str) -> i32 {
+    v[key].as_i64().unwrap_or(0) as i32
+}
+
+/// What the @llm function returned, as the node's LLMChatResponse. It
+/// returns `content` and may return `model`, the token counts and `served`,
+/// each under its proto field name; or `error` with a gRPC `code` and a
+/// `message`, which the node receives as that status.
+fn llm_answer(answer: &serde_json::Value) -> Result<LlmChatResponse, Status> {
+    if !answer["error"].is_null() {
+        return Err(refused(&answer["error"]));
+    }
+    let content = answer["content"]
+        .as_str()
+        .ok_or_else(|| Status::internal("the @llm function returned no content"))?
+        .to_string();
+    let s = &answer["served"];
+    let served = s.as_object().map(|_| LlmServed {
+        requested_provider: text(s, "requested_provider"),
+        requested_model: text(s, "requested_model"),
+        upstream_provider: text(s, "upstream_provider"),
+        executed_model: text(s, "executed_model"),
+        response_model: text(s, "response_model"),
+        request_id: text(s, "request_id"),
+        cost_usd: s["cost_usd"].as_str().map(String::from),
+        pricing_source: text(s, "pricing_source"),
+        attempt_count: count(s, "attempt_count"),
+        fallback: s["fallback"].as_bool().unwrap_or(false),
+    });
+    Ok(LlmChatResponse {
+        content,
+        model: text(answer, "model"),
+        prompt_tokens: count(answer, "prompt_tokens"),
+        completion_tokens: count(answer, "completion_tokens"),
+        total_tokens: count(answer, "total_tokens"),
+        served,
+    })
+}
+
+#[tonic::async_trait]
+impl LlmService for PythonPluginService {
+    async fn chat(
+        &self,
+        request: Request<LlmChatRequest>,
+    ) -> Result<Response<LlmChatResponse>, Status> {
+        Ok(Response::new(self.answer_llm(request.into_inner()).await?))
+    }
+
+    type StreamChatStream = Pin<Box<dyn Stream<Item = Result<LlmChatChunk, Status>> + Send>>;
+
+    /// The whole answer as one final chunk: the @llm function returns once,
+    /// so there is nothing to send before it has. It carries no per-token
+    /// signal, and says so.
+    async fn stream_chat(
+        &self,
+        request: Request<LlmChatRequest>,
+    ) -> Result<Response<Self::StreamChatStream>, Status> {
+        let answer = self.answer_llm(request.into_inner()).await?;
+        let chunk = LlmChatChunk {
+            token: answer.content,
+            done: true,
+            model: answer.model,
+            prompt_tokens: answer.prompt_tokens,
+            completion_tokens: answer.completion_tokens,
+            total_tokens: answer.total_tokens,
+            signal_of: Some(llm_chat_chunk::SignalOf::NoSignal(true)),
+            served: answer.served,
+        };
+        Ok(Response::new(Box::pin(tokio_stream::once(Ok(chunk)))))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1167,6 +1358,132 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(response.status_code, 404);
+    }
+
+    /// A service whose discovered handlers are these, as Initialize leaves it
+    /// after reading ATS.
+    async fn serving(handlers: &[(&str, &str)]) -> PythonPluginService {
+        let service = PythonPluginService::new("otaripy").unwrap();
+        let dir = scratch_dir(handlers.first().map(|h| h.0).unwrap_or("none"));
+        service
+            .initialize(Request::new(bare_initialize(&dir)))
+            .await
+            .unwrap();
+        let discovered: HashMap<String, String> = handlers
+            .iter()
+            .map(|(n, c)| (n.to_string(), c.to_string()))
+            .collect();
+        service.handlers.state.write().discovered_handlers = discovered.clone();
+        assert!(service.declare(&discovered).is_empty());
+        service
+    }
+
+    const ANSWERS: &str = concat!(
+        "@llm()\n",
+        "def chat(request):\n",
+        "    asked = request['messages'][-1]['content']\n",
+        "    return {\n",
+        "        'content': 'heard ' + asked,\n",
+        "        'model': 'good-model',\n",
+        "        'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5,\n",
+        "        'served': {\n",
+        "            'requested_provider': request['provider'],\n",
+        "            'requested_model': request['model'],\n",
+        "            'upstream_provider': 'secondary', 'executed_model': 'good-model',\n",
+        "            'request_id': 'req-1', 'cost_usd': '0.000023', 'attempt_count': 2,\n",
+        "            'fallback': True,\n",
+        "        },\n",
+        "    }\n",
+    );
+
+    fn asked() -> LlmChatRequest {
+        LlmChatRequest {
+            model: "fast".to_string(),
+            provider: "otaripy".to_string(),
+            messages: vec![crate::proto::ChatMessage {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    // The node's Chat reaches the @llm function, and what it says of how the
+    // call was served reaches the node as LLMServed.
+    #[tokio::test]
+    async fn chat_is_answered_by_the_llm_function() {
+        let service = serving(&[("gateway", ANSWERS)]).await;
+        let answer = service.chat(Request::new(asked())).await.unwrap().into_inner();
+
+        assert_eq!(answer.content, "heard hi");
+        assert_eq!(answer.model, "good-model");
+        assert_eq!(answer.total_tokens, 5);
+        let served = answer.served.unwrap();
+        assert_eq!(served.requested_provider, "otaripy");
+        assert_eq!(served.requested_model, "fast");
+        assert_eq!(served.upstream_provider, "secondary");
+        assert_eq!(served.request_id, "req-1");
+        assert_eq!(served.cost_usd.as_deref(), Some("0.000023"));
+        assert_eq!(served.attempt_count, 2);
+        assert!(served.fallback);
+        assert_eq!(served.pricing_source, "");
+    }
+
+    // StreamChat is the same answer in one final chunk, which says it
+    // carries no per-token signal, since the node refuses a chunk naming neither.
+    #[tokio::test]
+    async fn stream_chat_is_the_answer_in_one_final_chunk() {
+        use tokio_stream::StreamExt;
+        let service = serving(&[("gateway", ANSWERS)]).await;
+        let mut stream = service
+            .stream_chat(Request::new(asked()))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let chunk = stream.next().await.unwrap().unwrap();
+        assert!(stream.next().await.is_none());
+        assert!(chunk.done);
+        assert_eq!(chunk.token, "heard hi");
+        assert_eq!(chunk.signal_of, Some(llm_chat_chunk::SignalOf::NoSignal(true)));
+        assert_eq!(chunk.served.unwrap().request_id, "req-1");
+    }
+
+    #[tokio::test]
+    async fn chat_without_an_llm_function_is_unimplemented() {
+        let service = serving(&[]).await;
+        let refused = service.chat(Request::new(asked())).await.unwrap_err();
+
+        assert_eq!(refused.code(), tonic::Code::Unimplemented);
+    }
+
+    // A refusal the function returns keeps its gRPC code and its words, as
+    // the Go plugin's mapping of otari's statuses does.
+    #[tokio::test]
+    async fn a_refusal_the_llm_function_returns_keeps_its_code() {
+        let refuses = "@llm()\ndef chat(request):\n    return {'error': {'code': 'PERMISSION_DENIED', 'message': '403 budget_exceeded'}}\n";
+        let service = serving(&[("gateway", refuses)]).await;
+        let refused = service.chat(Request::new(asked())).await.unwrap_err();
+
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+        assert_eq!(refused.message(), "403 budget_exceeded");
+    }
+
+    #[tokio::test]
+    async fn a_second_llm_function_is_a_fault() {
+        let service = PythonPluginService::new("otaripy").unwrap();
+        let discovered: HashMap<String, String> = [("a", ANSWERS), ("b", ANSWERS)]
+            .iter()
+            .map(|(n, c)| (n.to_string(), c.to_string()))
+            .collect();
+        let faulted = service.declare(&discovered);
+
+        assert_eq!(faulted.len(), 1);
+        assert_eq!(faulted[0].0, "b");
+        assert_eq!(
+            service.handlers.state.read().llm_handler,
+            Some(("a".to_string(), "chat".to_string()))
+        );
     }
 
     #[tokio::test]

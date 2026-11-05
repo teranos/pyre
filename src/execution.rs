@@ -3,7 +3,7 @@
 //! Provides execution capabilities for the PythonEngine.
 
 use crate::atsstore::{self, SharedAtsStoreClient};
-use crate::engine::{ExecutionConfig, ExecutionResult, PythonEngine, WatcherInfo};
+use crate::engine::{Declarations, ExecutionConfig, ExecutionResult, PythonEngine, WatcherInfo};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use qntx_grpc::error::Error;
@@ -23,6 +23,19 @@ fn extraction_failed(what: &str, result: &ExecutionResult) -> String {
         )
     }
 }
+
+/// @llm and @route as every reading of a script other than their own sees
+/// them: decorators that change nothing. Without them a script that declares
+/// either raises NameError wherever pyre runs it to read something else.
+const DECLARATION_STUBS: &str = r#"
+class llm:
+    def __init__(self, description=None): pass
+    def __call__(self, fn): return fn
+
+class route:
+    def __init__(self, method, path): pass
+    def __call__(self, fn): return fn
+"#;
 
 /// Maximum length for captured variable values before truncation
 const MAX_VARIABLE_LENGTH: usize = 1000;
@@ -323,7 +336,7 @@ class schedule:
     def __call__(self, fn): return fn
 "#;
 
-        let full_code = format!("{}\n{}", preamble, code);
+        let full_code = format!("{}\n{}\n{}", preamble, DECLARATION_STUBS, code);
         let config = ExecutionConfig {
             capture_variables: true,
             ..Default::default()
@@ -336,8 +349,8 @@ class schedule:
         // Extract _qntx_watchers from the execution result
         // Re-execute to get the list as JSON
         let extract_code = format!(
-            "{}\n{}\nimport json\n_result = json.dumps(_qntx_watchers)",
-            preamble, code
+            "{}\n{}\n{}\nimport json\n_result = json.dumps(_qntx_watchers)",
+            preamble, DECLARATION_STUBS, code
         );
         let result = self.execute(&extract_code, &ExecutionConfig::default());
         if !result.success {
@@ -388,6 +401,12 @@ class schedule:
             "class schedule:\n",
             "    def __init__(self, every, description=None): pass\n",
             "    def __call__(self, fn): return fn\n",
+            "class llm:\n",
+            "    def __init__(self, description=None): pass\n",
+            "    def __call__(self, fn): return fn\n",
+            "class route:\n",
+            "    def __init__(self, method, path): pass\n",
+            "    def __call__(self, fn): return fn\n",
         );
 
         // Extraction runs the module to find decorators, so a plain script
@@ -421,6 +440,11 @@ class schedule:
             Err(e) if claims_decorator => return Err(e),
             Err(_) => return Ok(code.to_string()),
         }
+        // A module that only declares what it serves is read for that
+        // elsewhere; run as a script, its decorators still have to resolve.
+        if code.contains("@llm") || code.contains("@route") {
+            return Ok(format!("{STUBS}\n{code}\n{MAIN}"));
+        }
         Ok(format!("{code}\n{MAIN}"))
     }
 
@@ -448,8 +472,8 @@ class watch:
 "#;
 
         let extract_code = format!(
-            "{}\n{}\nimport json\n_result = json.dumps(_qntx_handler)",
-            preamble, code
+            "{}\n{}\n{}\nimport json\n_result = json.dumps(_qntx_handler)",
+            preamble, DECLARATION_STUBS, code
         );
         let result = self.execute(&extract_code, &ExecutionConfig::default());
         if !result.success {
@@ -508,8 +532,8 @@ class watch:
 "#;
 
         let extract_code = format!(
-            "{}\n{}\nimport json\n_result = json.dumps(_qntx_schedules)",
-            preamble, code
+            "{}\n{}\n{}\nimport json\n_result = json.dumps(_qntx_schedules)",
+            preamble, DECLARATION_STUBS, code
         );
         let result = self.execute(&extract_code, &ExecutionConfig::default());
         if !result.success {
@@ -546,6 +570,138 @@ class watch:
                 })
             })
             .collect())
+    }
+
+    /// What a script declares it serves: its @llm function and its @route
+    /// functions. Read by running the module, as @watch and @schedule are.
+    pub fn extract_declarations(&self, code: &str) -> Result<Declarations, String> {
+        let preamble = r#"
+_qntx_llm = []
+_qntx_routes = []
+
+class handler:
+    def __init__(self, description=None): pass
+    def __call__(self, fn): return fn
+
+class watch:
+    def __init__(self, predicate, context=None): pass
+    def __call__(self, fn): return fn
+
+class schedule:
+    def __init__(self, every, description=None): pass
+    def __call__(self, fn): return fn
+
+class llm:
+    def __init__(self, description=None): pass
+    def __call__(self, fn):
+        _qntx_llm.append(fn.__name__)
+        return fn
+
+class route:
+    def __init__(self, method, path):
+        self._method = method
+        self._path = path
+    def __call__(self, fn):
+        _qntx_routes.append({
+            'handler_fn': fn.__name__,
+            'method': str(self._method).upper(),
+            'path': str(self._path),
+        })
+        return fn
+"#;
+
+        let extract_code = format!(
+            "{}\n{}\nimport json\n_result = json.dumps({{'llm': _qntx_llm, 'routes': _qntx_routes}})",
+            preamble, code
+        );
+        let result = self.execute(&extract_code, &ExecutionConfig::default());
+        if !result.success {
+            return Err(extraction_failed("@llm and @route", &result));
+        }
+
+        let read: serde_json::Value = match result.result {
+            Some(serde_json::Value::String(ref s)) => serde_json::from_str(s).map_err(|e| {
+                format!("failed to parse the @llm and @route extraction result: {e}")
+            })?,
+            other => {
+                return Err(format!(
+                    "the @llm and @route extraction returned no usable result: {other:?}"
+                ))
+            }
+        };
+
+        let llm: Vec<String> = read["llm"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        if llm.len() > 1 {
+            return Err(format!(
+                "a script declares one @llm function, and this one declares {}: {}",
+                llm.len(),
+                llm.join(", ")
+            ));
+        }
+
+        let routes = read["routes"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|entry| {
+                        Some(crate::engine::RouteInfo {
+                            handler_fn: entry.get("handler_fn")?.as_str()?.to_string(),
+                            method: entry.get("method")?.as_str()?.to_string(),
+                            path: entry.get("path")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(Declarations {
+            llm: llm.into_iter().next(),
+            routes,
+        })
+    }
+
+    /// Call one function a script declares, with `argument` as its one
+    /// parameter, and return what it returned. Both cross as JSON. The module
+    /// runs first, as it does for every job, so the function is the one the
+    /// script defines now.
+    pub fn call_declared(
+        &self,
+        code: &str,
+        function: &str,
+        argument: &serde_json::Value,
+        ats_client: Option<SharedAtsStoreClient>,
+    ) -> Result<serde_json::Value, String> {
+        const STUBS: &str = r#"
+class handler:
+    def __init__(self, description=None): pass
+    def __call__(self, fn): return fn
+class watch:
+    def __init__(self, predicate, context=None): pass
+    def __call__(self, fn): return fn
+class schedule:
+    def __init__(self, every, description=None): pass
+    def __call__(self, fn): return fn
+"#;
+        let call = format!(
+            "{STUBS}\n{DECLARATION_STUBS}\n{code}\nimport json as _qntx_json\n_result = _qntx_json.dumps({function}(upstream))"
+        );
+        let result = self.execute_with_ats(
+            &call,
+            &ExecutionConfig::default(),
+            ats_client,
+            Some(argument),
+        );
+        if !result.success {
+            return Err(result.error.unwrap_or_else(|| "no reason given".to_string()));
+        }
+        match result.result {
+            Some(serde_json::Value::String(ref s)) => serde_json::from_str(s)
+                .map_err(|e| format!("{function} returned what is not JSON: {e}")),
+            other => Err(format!("{function} returned nothing usable: {other:?}")),
+        }
     }
 
     /// Install a package into the engine's site directory, at runtime. A wheel
@@ -842,6 +998,88 @@ mod tests {
 
         assert!(result.success, "{:?}", result.error);
         assert_eq!(result.stdout.trim(), "tick");
+    }
+
+    const SERVES: &str = concat!(
+        "@llm()\n",
+        "def chat(request):\n",
+        "    return {'content': 'heard ' + request['model'], 'model': request['model']}\n",
+        "\n",
+        "@route('post', '/v1/chat/completions')\n",
+        "def completions(request):\n",
+        "    return {'status': 200, 'body': 'ok'}\n",
+    );
+
+    // What a script serves is read off it, as what triggers it is.
+    #[test]
+    fn a_script_declares_its_llm_function_and_its_routes() {
+        let engine = PythonEngine::new().unwrap();
+        let declared = engine.extract_declarations(SERVES).unwrap();
+
+        assert_eq!(declared.llm.as_deref(), Some("chat"));
+        assert_eq!(
+            declared.routes,
+            vec![crate::engine::RouteInfo {
+                handler_fn: "completions".to_string(),
+                method: "POST".to_string(),
+                path: "/v1/chat/completions".to_string(),
+            }]
+        );
+    }
+
+    // The other readings see @llm and @route as decorators that change
+    // nothing, so a script that declares them still reads for its triggers.
+    #[test]
+    fn declaring_what_a_script_serves_leaves_its_triggers_readable() {
+        let engine = PythonEngine::new().unwrap();
+
+        assert!(engine.extract_watchers(SERVES).unwrap().is_empty());
+        assert!(engine.extract_schedules(SERVES).unwrap().is_empty());
+        assert_eq!(engine.extract_handler(SERVES).unwrap(), None);
+        let ready = engine.prepared(SERVES).unwrap();
+        let result = engine.execute(&ready, &ExecutionConfig::default());
+        assert!(result.success, "{:?}", result.error);
+    }
+
+    #[test]
+    fn a_script_without_declarations_declares_nothing() {
+        let engine = PythonEngine::new().unwrap();
+        let declared = engine
+            .extract_declarations("@schedule(every=60)\ndef tick():\n    pass\n")
+            .unwrap();
+
+        assert_eq!(declared, crate::engine::Declarations::default());
+    }
+
+    // The node has one place to send a plugin's LLM calls.
+    #[test]
+    fn a_script_declares_one_llm_function() {
+        let engine = PythonEngine::new().unwrap();
+        let two = "@llm()\ndef a(r):\n    pass\n@llm()\ndef b(r):\n    pass\n";
+
+        let refused = engine.extract_declarations(two).unwrap_err();
+        assert!(refused.contains("a, b"), "{refused}");
+    }
+
+    #[test]
+    fn a_declared_function_is_called_with_its_argument() {
+        let engine = PythonEngine::new().unwrap();
+        let answer = engine
+            .call_declared(SERVES, "chat", &serde_json::json!({"model": "m"}), None)
+            .unwrap();
+
+        assert_eq!(answer, serde_json::json!({"content": "heard m", "model": "m"}));
+    }
+
+    #[test]
+    fn a_declared_function_that_raises_says_why() {
+        let engine = PythonEngine::new().unwrap();
+        let script = "@llm()\ndef chat(request):\n    raise ValueError('no model named')\n";
+        let refused = engine
+            .call_declared(script, "chat", &serde_json::json!({}), None)
+            .unwrap_err();
+
+        assert!(refused.contains("no model named"), "{refused}");
     }
 
     #[test]

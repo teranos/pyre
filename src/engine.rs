@@ -24,6 +24,27 @@ pub struct WatcherInfo {
     pub contexts: Vec<String>,
 }
 
+/// An HTTP route a handler serves, from @route(method, path)
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteInfo {
+    /// Function name that answers the route
+    pub handler_fn: String,
+    /// HTTP method, upper case
+    pub method: String,
+    /// Path below /api/{plugin}, as the node hands it on
+    pub path: String,
+}
+
+/// What a script declares it serves, beside what triggers it: the function
+/// that answers the node's LLM calls (@llm) and the HTTP routes (@route).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Declarations {
+    /// Function name of the @llm handler, when the script has one
+    pub llm: Option<String>,
+    /// Routes the script serves
+    pub routes: Vec<RouteInfo>,
+}
+
 /// Schedule metadata extracted from a @schedule-decorated handler function
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScheduleMetadata {
