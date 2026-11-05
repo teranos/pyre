@@ -4,7 +4,8 @@
 //! called from PyO3 functions during Python execution.
 
 use crate::proto::{
-    ats_store_service_client::AtsStoreServiceClient, AttestationCommand, AttestationFilter,
+    ats_store_service_client::AtsStoreServiceClient, attestation_command, attestation_filter,
+    ActorNames, AttestationCommand, AttestationFilter,
     GenerateAttestationRequest, GetAttestationsRequest,
 };
 use pyo3::prelude::*;
@@ -120,9 +121,9 @@ fn last_filter(query: LastQuery) -> AttestationFilter {
         predicates: query.predicates,
         contexts: query.contexts,
         actors: query.actors,
-        time_start: None,
-        time_end: None,
-        limit: Some(1),
+        from: Some(attestation_filter::From::UnboundedStart(true)),
+        to: Some(attestation_filter::To::UnboundedEnd(true)),
+        limit: 1,
     }
 }
 
@@ -225,11 +226,16 @@ impl AtsStoreClient {
             subjects,
             predicates,
             contexts,
-            actors: actors.unwrap_or_default(),
-            timestamp: None, // Server will use current time
+            by: Some(match actors.filter(|a| !a.is_empty()) {
+                Some(names) => attestation_command::By::ActorsNamed(ActorNames { names }),
+                None => attestation_command::By::ByNode(true),
+            }),
+            when: Some(attestation_command::When::Now(true)),
             attributes,
             source: "python".to_string(),
-            source_version: crate::version::version().to_string(),
+            version: Some(attestation_command::Version::SourceVersion(
+                crate::version::version().to_string(),
+            )),
         };
 
         let request = GenerateAttestationRequest {
@@ -597,7 +603,7 @@ mod tests {
     #[test]
     fn last_filter_asks_for_exactly_one_attestation() {
         let filter = last_filter(LastQuery::default());
-        assert_eq!(filter.limit, Some(1));
+        assert_eq!(filter.limit, 1);
     }
 
     /// "What did mp004_request_ad_renders file?" had no answer while every
@@ -654,7 +660,7 @@ mod tests {
         assert_eq!(filter.predicates, vec!["observed".to_string()]);
         assert_eq!(filter.contexts, vec!["ticker".to_string()]);
         assert_eq!(filter.actors, vec!["glyph:abc".to_string()]);
-        assert_eq!(filter.time_start, None);
-        assert_eq!(filter.time_end, None);
+        assert_eq!(filter.from, Some(attestation_filter::From::UnboundedStart(true)));
+        assert_eq!(filter.to, Some(attestation_filter::To::UnboundedEnd(true)));
     }
 }

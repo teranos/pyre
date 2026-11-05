@@ -24,7 +24,7 @@ pub struct PluginConfig {
 /// This defines all configuration fields that the plugin accepts,
 /// including their types, descriptions, and validation constraints.
 pub fn build_schema() -> HashMap<String, crate::proto::ConfigFieldSchema> {
-    use crate::proto::ConfigFieldSchema;
+    use crate::proto::{config_field_schema, ConfigFieldSchema};
 
     let mut fields = HashMap::new();
 
@@ -35,8 +35,8 @@ pub fn build_schema() -> HashMap<String, crate::proto::ConfigFieldSchema> {
             description: "Colon-separated list of Python module search paths".to_string(),
             default_value: String::new(),
             required: false,
-            min_value: String::new(),
-            max_value: String::new(),
+            min: None,
+            max: None,
             pattern: String::new(),
             element_type: String::new(),
         },
@@ -49,8 +49,8 @@ pub fn build_schema() -> HashMap<String, crate::proto::ConfigFieldSchema> {
             description: "Comma-separated list of Python modules to auto-import".to_string(),
             default_value: "numpy,pandas,scipy,matplotlib".to_string(),
             required: false,
-            min_value: String::new(),
-            max_value: String::new(),
+            min: None,
+            max: None,
             pattern: String::new(),
             element_type: String::new(),
         },
@@ -63,8 +63,8 @@ pub fn build_schema() -> HashMap<String, crate::proto::ConfigFieldSchema> {
             description: "Maximum execution time for Python code in seconds".to_string(),
             default_value: "30".to_string(),
             required: false,
-            min_value: "1".to_string(),
-            max_value: "300".to_string(),
+            min: Some(config_field_schema::Min::MinValue("1".to_string())),
+            max: Some(config_field_schema::Max::MaxValue("300".to_string())),
             pattern: String::new(),
             element_type: String::new(),
         },
@@ -77,8 +77,8 @@ pub fn build_schema() -> HashMap<String, crate::proto::ConfigFieldSchema> {
             description: "Maximum number of concurrent Python execution workers".to_string(),
             default_value: "4".to_string(),
             required: false,
-            min_value: "1".to_string(),
-            max_value: "16".to_string(),
+            min: Some(config_field_schema::Min::MinValue("1".to_string())),
+            max: Some(config_field_schema::Max::MaxValue("16".to_string())),
             pattern: String::new(),
             element_type: String::new(),
         },
@@ -91,8 +91,8 @@ pub fn build_schema() -> HashMap<String, crate::proto::ConfigFieldSchema> {
             description: "Enable debug logging for Python execution".to_string(),
             default_value: "false".to_string(),
             required: false,
-            min_value: String::new(),
-            max_value: String::new(),
+            min: None,
+            max: None,
             pattern: String::new(),
             element_type: String::new(),
         },

@@ -1,6 +1,6 @@
 [package]
 name = "pyre"
-version = "0.19.0"
+version = "0.20.0"
 edition = "2021"
 description = "Python runtime engine for QNTX"
 license = "MIT"
@@ -13,8 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 # QNTX gRPC infrastructure
-qntx-grpc = { git = "https://github.com/teranos/QNTX", features = ["plugin"] }
-qntx-proto = { git = "https://github.com/teranos/QNTX" }
+qntx-grpc = { git = "https://github.com/teranos/QNTX", rev = "035c62ed46375dde51243efe509006e610a8a76e", features = ["plugin"] }
+qntx-proto = { git = "https://github.com/teranos/QNTX", rev = "035c62ed46375dde51243efe509006e610a8a76e" }
 
 # gRPC and async
 tonic = "0.12"

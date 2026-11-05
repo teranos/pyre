@@ -12,10 +12,10 @@ use crate::engine::PythonEngine;
 use crate::handlers::{HandlerContext, PluginState};
 use crate::proto::{
     domain_plugin_service_server::DomainPluginService, python_service_server::PythonService,
-    ConfigSchemaResponse, Empty, ExecuteJobRequest, ExecuteJobResponse, GlyphDefResponse,
-    HealthResponse, HttpHeader, HttpRequest, HttpResponse, InitializeRequest, InitializeResponse,
-    MetadataResponse, ParseAxQueryRequest, ParseAxQueryResponse, PythonExecuteRequest,
-    PythonExecuteResponse, ScheduleInfo, WatcherRegistration, WebSocketMessage,
+    service_endpoint, ConfigSchemaResponse, ElementDefResponse, Empty, ExecuteJobRequest,
+    ExecuteJobResponse, HealthResponse, HttpHeader, HttpRequest, HttpResponse, InitializeRequest,
+    InitializeResponse, MetadataResponse, PythonExecuteRequest, PythonExecuteResponse,
+    ScheduleInfo, ServiceEndpoint, ShutdownResponse, WatcherRegistration, WebSocketMessage,
 };
 use crate::version::version;
 use parking_lot::RwLock;
@@ -28,6 +28,15 @@ use tracing::{debug, error, info, warn};
 
 /// Default timeout for Python job execution (5 minutes)
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
+
+/// Where a service the node runs answers, when it does. A service the node
+/// runs without says why instead, and that is no endpoint to dial.
+fn answering(endpoint: &Option<ServiceEndpoint>) -> Option<String> {
+    match endpoint.as_ref()?.state.as_ref()? {
+        service_endpoint::State::Address(address) if !address.is_empty() => Some(address.clone()),
+        _ => None,
+    }
+}
 
 /// Python plugin gRPC service
 pub struct PythonPluginService {
@@ -78,7 +87,7 @@ impl PythonPluginService {
         config: Option<PluginConfig>,
     ) -> HashMap<String, String> {
         use crate::proto::{
-            ats_store_service_client::AtsStoreServiceClient, AttestationFilter,
+            ats_store_service_client::AtsStoreServiceClient, attestation_filter, AttestationFilter,
             GetAttestationsRequest,
         };
         use tonic::transport::Channel;
@@ -107,9 +116,9 @@ impl PythonPluginService {
             predicates: vec!["handler".to_string(), "handler:faulted".to_string()],
             contexts: vec![self.name.clone()],
             actors: vec![],
-            time_start: None,
-            time_end: None,
-            limit: Some(200),
+            from: Some(attestation_filter::From::UnboundedStart(true)),
+            to: Some(attestation_filter::To::UnboundedEnd(true)),
+            limit: 200,
         };
 
         let request = GetAttestationsRequest {
@@ -270,7 +279,7 @@ impl DomainPluginService for PythonPluginService {
                 ats_store_endpoint: req.ats_store_endpoint.clone(),
                 queue_endpoint: req.queue_endpoint,
                 schedule_endpoint: req.schedule_endpoint.clone(),
-                fetch_endpoint: req.fetch_endpoint.clone(),
+                fetch_endpoint: answering(&req.fetch_endpoint).unwrap_or_default(),
                 auth_token: req.auth_token.clone(),
                 config: req.config,
             });
@@ -300,12 +309,12 @@ impl DomainPluginService for PythonPluginService {
             }
 
             // Initialize Fetch client if endpoint is provided
-            if !req.fetch_endpoint.is_empty() {
+            if let Some(endpoint) = answering(&req.fetch_endpoint) {
                 debug!("Initializing Fetch client for Python HTTP fetching");
                 crate::fetchstore::init_shared_client(
                     &state.fetch_client,
                     crate::fetchstore::FetchConfig {
-                        endpoint: req.fetch_endpoint,
+                        endpoint,
                         auth_token: req.auth_token,
                     },
                 );
@@ -431,7 +440,6 @@ impl DomainPluginService for PythonPluginService {
                         interval_seconds: s.interval_seconds,
                         enabled_by_default: true,
                         description: s.description,
-                        ats_code: String::new(),
                     });
                 }
             }
@@ -491,12 +499,12 @@ impl DomainPluginService for PythonPluginService {
     }
 
     /// Shutdown the plugin
-    async fn shutdown(&self, _request: Request<Empty>) -> Result<Response<Empty>, Status> {
+    async fn shutdown(&self, _request: Request<Empty>) -> Result<Response<ShutdownResponse>, Status> {
         info!("Shutting down Python plugin");
         let mut state = self.handlers.state.write();
         state.initialized = false;
         state.config = None;
-        Ok(Response::new(Empty {}))
+        Ok(Response::new(ShutdownResponse { stopped: true }))
     }
 
     /// Handle HTTP requests - routes to appropriate handler
@@ -616,20 +624,12 @@ impl DomainPluginService for PythonPluginService {
         }))
     }
 
-    /// Register custom glyph types (none for Python plugin)
-    async fn register_glyphs(
+    /// Register custom element types (none for Python plugin)
+    async fn register_elements(
         &self,
         _request: Request<Empty>,
-    ) -> Result<Response<GlyphDefResponse>, Status> {
-        Ok(Response::new(GlyphDefResponse { glyphs: vec![] }))
-    }
-
-    /// Parse an Ax query (not implemented — kern handles parsing)
-    async fn parse_ax_query(
-        &self,
-        _request: Request<ParseAxQueryRequest>,
-    ) -> Result<Response<ParseAxQueryResponse>, Status> {
-        Err(Status::unimplemented("ParseAxQuery is handled by kern"))
+    ) -> Result<Response<ElementDefResponse>, Status> {
+        Ok(Response::new(ElementDefResponse { elements: vec![] }))
     }
 
     /// Execute an async job
@@ -690,9 +690,9 @@ impl PythonService for PythonPluginService {
             })?)
         };
 
-        // Set glyph ID for actor convention
-        if !req.glyph_id.is_empty() {
-            crate::atsstore::set_current_glyph_id(Some(req.glyph_id.clone()));
+        // Set element ID for actor convention
+        if !req.element_id.is_empty() {
+            crate::atsstore::set_current_glyph_id(Some(req.element_id.clone()));
         }
 
         let config = crate::engine::ExecutionConfig {
@@ -879,7 +879,6 @@ impl PythonPluginService {
             .unwrap_or_default(),
             progress_current: 0,
             progress_total: 0,
-            cost_actual: 0.0,
             log_entries: vec![],
             plugin_version: version().to_string(),
         }))
@@ -945,8 +944,7 @@ impl PythonPluginService {
                 result: result_bytes,
                 progress_current: 0,
                 progress_total: 0,
-                cost_actual: 0.0,
-                log_entries: vec![],
+                    log_entries: vec![],
                 plugin_version: version().to_string(),
             }))
         } else {
@@ -959,8 +957,7 @@ impl PythonPluginService {
                 result: vec![],
                 progress_current: 0,
                 progress_total: 0,
-                cost_actual: 0.0,
-                log_entries: vec![],
+                    log_entries: vec![],
                 plugin_version: version().to_string(),
             }))
         }
@@ -1061,8 +1058,7 @@ impl PythonPluginService {
                 result: result_bytes,
                 progress_current: 0,
                 progress_total: 0,
-                cost_actual: 0.0,
-                log_entries: vec![],
+                    log_entries: vec![],
                 plugin_version: version().to_string(),
             }))
         } else {
@@ -1083,8 +1079,7 @@ impl PythonPluginService {
                 result: vec![],
                 progress_current: 0,
                 progress_total: 0,
-                cost_actual: 0.0,
-                log_entries: vec![],
+                    log_entries: vec![],
                 plugin_version: version().to_string(),
             }))
         }
