@@ -31,6 +31,19 @@ use tracing::{debug, error, info, warn};
 /// Default timeout for Python job execution (5 minutes)
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
+/// The paths handle_http answers itself, by method.
+const PYRE_PATHS: &[(&str, &str)] = &[
+    ("POST", "/execute"),
+    ("POST", "/evaluate"),
+    ("POST", "/execute-file"),
+    ("POST", "/uv/install"),
+    ("POST", "/pip/install"),
+    ("GET", "/uv/check"),
+    ("GET", "/pip/check"),
+    ("GET", "/version"),
+    ("GET", "/modules"),
+];
+
 /// Where a service the node runs answers, when it does. A service the node
 /// runs without says why instead, and that is no endpoint to dial.
 fn answering(endpoint: &Option<ServiceEndpoint>) -> Option<String> {
@@ -398,6 +411,12 @@ impl DomainPluginService for PythonPluginService {
         for handler_name in &sorted_handlers {
             handler_names.push(format!("{}.{}", self.name, handler_name));
 
+            // Faulted already, by reading what it serves: running the module
+            // again would fault it a second time for the same reason.
+            if faulted.iter().any(|(n, _)| n == *handler_name) {
+                continue;
+            }
+
             if let Some(code) = discovered_handlers.get(*handler_name) {
                 let state = self.handlers.state.read();
 
@@ -516,6 +535,10 @@ impl DomainPluginService for PythonPluginService {
         let mut state = self.handlers.state.write();
         state.initialized = false;
         state.config = None;
+        // A stopped plugin serves nothing it declared; Initialize reads the
+        // declarations again.
+        state.llm_handler = None;
+        state.routes.clear();
         Ok(Response::new(ShutdownResponse { stopped: true }))
     }
 
@@ -761,40 +784,75 @@ impl PythonPluginService {
     /// read, or that declares a second @llm, is faulted and serves nothing.
     fn declare(&self, handlers: &HashMap<String, String>) -> Vec<(String, String)> {
         let mut faulted = vec![];
-        let mut llm_handler: Option<(String, String)> = None;
-        let mut routes = vec![];
         let mut names: Vec<_> = handlers.keys().collect();
         names.sort();
+        let mut read = vec![];
         for name in names {
-            let read = {
+            let declared = {
                 let state = self.handlers.state.read();
                 state.engine.extract_declarations(&handlers[name])
             };
-            let declared = match read {
-                Ok(d) => d,
+            match declared {
+                Ok(d) => read.push((name.clone(), d)),
                 Err(e) => {
                     error!("handler {name} did not load: {e}");
                     faulted.push((name.clone(), e));
-                    continue;
                 }
-            };
-            if let Some(function) = declared.llm {
-                if let Some((first, _)) = &llm_handler {
-                    let e = format!(
-                        "{first} answers the node's LLM calls already, and a plugin has one @llm function"
-                    );
-                    error!("handler {name} did not load: {e}");
-                    faulted.push((name.clone(), e));
-                    continue;
-                }
-                info!("LLM: {}.{} answers the node's LLM calls", name, function);
-                llm_handler = Some((name.clone(), function));
             }
-            for route in declared.routes {
+        }
+
+        // One @llm function answers the node's LLM calls: the one answering
+        // them now while its handler still declares it, else the first by
+        // name. Another is not served, and its handler is not faulted for it:
+        // a fault takes the whole handler off every later load.
+        let incumbent = self.handlers.state.read().llm_handler.clone();
+        let declares_llm = |handler: &str| {
+            read.iter()
+                .find(|(n, d)| n == handler && d.llm.is_some())
+                .map(|(n, d)| (n.clone(), d.llm.clone().unwrap_or_default()))
+        };
+        let llm_handler = incumbent
+            .and_then(|(handler, _)| declares_llm(&handler))
+            .or_else(|| {
+                read.iter()
+                    .find(|(_, d)| d.llm.is_some())
+                    .map(|(n, d)| (n.clone(), d.llm.clone().unwrap_or_default()))
+            });
+        if let Some((handler, function)) = &llm_handler {
+            info!("LLM: {}.{} answers the node's LLM calls", handler, function);
+        }
+        for (name, d) in &read {
+            if let (Some(function), Some((serving, _))) = (&d.llm, &llm_handler) {
+                if name != serving {
+                    error!(
+                        "{name}.{function} is not served: {serving} answers the node's LLM calls, and a plugin has one @llm function"
+                    );
+                }
+            }
+        }
+
+        // A route is one method and path, answered by one function, and pyre's
+        // own paths are pyre's. A declaration of either is not kept.
+        let mut routes: Vec<(crate::engine::RouteInfo, String)> = vec![];
+        for (name, d) in read {
+            for route in d.routes {
+                let pair = (route.method.as_str(), route.path.as_str());
+                if PYRE_PATHS.contains(&pair) {
+                    error!("{} {} via {}.{} is not served: it is pyre's own path", route.method, route.path, name, route.handler_fn);
+                    continue;
+                }
+                if let Some((_, first)) = routes
+                    .iter()
+                    .find(|(r, _)| r.method == route.method && r.path == route.path)
+                {
+                    error!("{} {} via {}.{} is not served: {} declares it already", route.method, route.path, name, route.handler_fn, first);
+                    continue;
+                }
                 info!("Route: {} {} via {}.{}", route.method, route.path, name, route.handler_fn);
                 routes.push((route, name.clone()));
             }
         }
+
         let mut state = self.handlers.state.write();
         state.llm_handler = llm_handler;
         state.routes = routes;
@@ -1563,8 +1621,9 @@ mod tests {
     }
 
     /// An ATS store holding these handlers, as the node's answers
-    /// GetAttestations for predicate=handler. Only that RPC is answered.
-    struct HeldHandlers(Vec<(String, String)>);
+    /// GetAttestations for predicate=handler, and counting the attestations
+    /// it is asked to write. Writes are refused after they are counted.
+    struct HeldHandlers(Vec<(String, String)>, Arc<std::sync::atomic::AtomicUsize>);
 
     #[tonic::async_trait]
     impl crate::proto::ats_store_service_server::AtsStoreService for HeldHandlers {
@@ -1584,6 +1643,7 @@ mod tests {
             &self,
             _: Request<crate::proto::GenerateAttestationRequest>,
         ) -> Result<Response<crate::proto::GenerateAttestationResponse>, Status> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Err(Status::unimplemented("not held"))
         }
         async fn batch_generate_and_create_attestations(
@@ -1628,20 +1688,30 @@ mod tests {
 
     /// Where an ATS store holding these handlers answers.
     async fn ats_holding(handlers: &[(&str, &str)]) -> String {
+        ats_counting(handlers).await.0
+    }
+
+    /// Where an ATS store holding these handlers answers, and how many
+    /// attestations it has been asked to write.
+    async fn ats_counting(
+        handlers: &[(&str, &str)],
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
+        let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let held = HeldHandlers(
             handlers
                 .iter()
                 .map(|(n, c)| (n.to_string(), c.to_string()))
                 .collect(),
+            written.clone(),
         );
         tokio::spawn(
             tonic::transport::Server::builder()
                 .add_service(crate::proto::ats_store_service_server::AtsStoreServiceServer::new(held))
                 .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
         );
-        address.to_string()
+        (address.to_string(), written)
     }
 
     // Initialize, with the handlers read from ATS as the node holds them,
@@ -1769,21 +1839,96 @@ mod tests {
         assert_eq!(answer.content, "as the node resolved it");
     }
 
-    #[tokio::test]
-    async fn a_second_llm_function_is_a_fault() {
-        let service = PythonPluginService::new("otaripy").unwrap();
-        let discovered: HashMap<String, String> = [("a", ANSWERS), ("b", ANSWERS)]
-            .iter()
-            .map(|(n, c)| (n.to_string(), c.to_string()))
-            .collect();
-        let faulted = service.declare(&discovered);
+    fn handlers_of(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(n, c)| (n.to_string(), c.to_string())).collect()
+    }
 
-        assert_eq!(faulted.len(), 1);
-        assert_eq!(faulted[0].0, "b");
+    // A second @llm function is not served, and its handler is not faulted:
+    // a fault is attested and takes the whole handler, its watchers and
+    // schedules with it, off every later load.
+    #[tokio::test]
+    async fn a_second_llm_function_is_not_served_and_not_faulted() {
+        let service = PythonPluginService::new("otaripy").unwrap();
+        let faulted = service.declare(&handlers_of(&[("a", ANSWERS), ("b", ANSWERS)]));
+
+        assert!(faulted.is_empty(), "{faulted:?}");
         assert_eq!(
             service.handlers.state.read().llm_handler,
             Some(("a".to_string(), "chat".to_string()))
         );
+    }
+
+    // The handler serving the node's LLM calls keeps serving them when a
+    // handler whose name sorts before it arrives declaring @llm too.
+    #[tokio::test]
+    async fn the_serving_llm_function_keeps_serving_when_another_arrives() {
+        let service = PythonPluginService::new("otaripy").unwrap();
+        service.declare(&handlers_of(&[("gateway", ANSWERS)]));
+        service.declare(&handlers_of(&[("aa", ANSWERS), ("gateway", ANSWERS)]));
+
+        assert_eq!(
+            service.handlers.state.read().llm_handler,
+            Some(("gateway".to_string(), "chat".to_string()))
+        );
+    }
+
+    // pyre's own paths stay pyre's: a route declaring one is not kept.
+    #[tokio::test]
+    async fn a_route_on_one_of_pyres_own_paths_is_not_kept() {
+        let takes = "@route('GET', '/version')\ndef v(request):\n    return {'status': 418}\n";
+        let service = serving(&[("gateway", takes)]).await;
+        assert!(service.handlers.state.read().routes.is_empty());
+
+        let version = HttpRequest {
+            method: "GET".to_string(),
+            path: "/version".to_string(),
+            ..Default::default()
+        };
+        let response = service.handle_http(Request::new(version)).await.unwrap().into_inner();
+        assert_eq!(response.status_code, 200);
+    }
+
+    // One method and path is one route: a second declaration of it is not
+    // kept, so which function answers is the first, said in the log.
+    #[tokio::test]
+    async fn a_route_declared_twice_is_kept_once() {
+        let service = serving(&[("a", ROUTES), ("b", ROUTES)]).await;
+        let routes = service.handlers.state.read().routes.clone();
+
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].1, "a");
+    }
+
+    // A plugin that has been told to stop serves no declared route and no
+    // LLM call.
+    #[tokio::test]
+    async fn a_stopped_plugin_serves_nothing_it_declared() {
+        let service = serving(&[("gateway", ROUTES), ("llm", ANSWERS)]).await;
+        service.shutdown(Request::new(Empty {})).await.unwrap();
+
+        let response = service
+            .handle_http(Request::new(post("/v1/chat/completions", b"{}")))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.status_code, 404);
+        let refused = service.chat(Request::new(asked())).await.unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::Unimplemented);
+    }
+
+    // A handler that does not load is faulted once, not once per reading.
+    // Multi-threaded: the fault is written from inside Initialize by a client
+    // that blocks for its answer, and the stand-in ATS answers on this runtime.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_broken_handler_is_faulted_once() {
+        let service = PythonPluginService::new("otaripy").unwrap();
+        let dir = scratch_dir("broken");
+        let mut request = bare_initialize(&dir);
+        let (endpoint, written) = ats_counting(&[("broken", "raise SystemError('no')\n")]).await;
+        request.ats_store_endpoint = endpoint;
+        service.initialize(Request::new(request)).await.unwrap();
+
+        assert_eq!(written.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
