@@ -1138,6 +1138,88 @@ mod tests {
         assert!(refused.contains("no model named"), "{refused}");
     }
 
+    // A server a plugin's Python keeps in process (otari's ASGI app, for one)
+    // lives on an asyncio loop in a thread of its own, started once. Asked of
+    // the interpreter as pyre runs it: whether that loop runs while no handler
+    // does, and whether a handler that waits on it is answered, since the
+    // handler holds the GIL for as long as it runs.
+    #[test]
+    fn a_loop_started_once_serves_handlers_that_wait_on_it() {
+        let engine = PythonEngine::new().unwrap();
+        let start = concat!(
+            "import sys, types, asyncio, threading, time\n",
+            "if '_pyre_loop_probe' not in sys.modules:\n",
+            "    m = types.ModuleType('_pyre_loop_probe')\n",
+            "    m.ticks = 0\n",
+            "    m.loop = asyncio.new_event_loop()\n",
+            "    async def tick():\n",
+            "        while True:\n",
+            "            m.ticks += 1\n",
+            "            await asyncio.sleep(0.01)\n",
+            "    def run():\n",
+            "        asyncio.set_event_loop(m.loop)\n",
+            "        m.loop.create_task(tick())\n",
+            "        m.loop.run_forever()\n",
+            "    m.thread = threading.Thread(target=run, daemon=True)\n",
+            "    m.thread.start()\n",
+            "    sys.modules['_pyre_loop_probe'] = m\n",
+            "    time.sleep(0.05)\n",
+        );
+        let ticks = |engine: &PythonEngine| -> i64 {
+            let r = engine.execute(
+                "import sys\n_result = sys.modules['_pyre_loop_probe'].ticks\n",
+                &ExecutionConfig::default(),
+            );
+            assert!(r.success, "{:?}", r.error);
+            r.result.unwrap().as_i64().unwrap()
+        };
+
+        let r = engine.execute(start, &ExecutionConfig::default());
+        assert!(r.success, "{:?}", r.error);
+
+        // Between handlers no Python runs and pyre holds no GIL.
+        let before = ticks(&engine);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let idle = ticks(&engine) - before;
+
+        // A handler that waits on the loop, as a call into otari would.
+        let waits = concat!(
+            "import sys, asyncio, time\n",
+            "m = sys.modules['_pyre_loop_probe']\n",
+            "async def answer():\n",
+            "    await asyncio.sleep(0.2)\n",
+            "    return 42\n",
+            "t = time.monotonic()\n",
+            "got = asyncio.run_coroutine_threadsafe(answer(), m.loop).result(timeout=5)\n",
+            "_result = [got, time.monotonic() - t]\n",
+        );
+        let r = engine.execute(waits, &ExecutionConfig::default());
+        assert!(r.success, "{:?}", r.error);
+        let waited = r.result.unwrap();
+
+        // A handler that computes and never waits: the loop gets the GIL only
+        // at the interpreter's switch interval.
+        let before = ticks(&engine);
+        let busy = concat!(
+            "import time\n",
+            "t = time.monotonic()\n",
+            "while time.monotonic() - t < 0.5:\n",
+            "    pass\n",
+        );
+        let r = engine.execute(busy, &ExecutionConfig::default());
+        assert!(r.success, "{:?}", r.error);
+        let during_busy = ticks(&engine) - before;
+
+        println!(
+            "loop probe: {idle} ticks in 500 ms idle; a waiting handler got {} after {:.3} s; {during_busy} ticks in 500 ms of a busy handler",
+            waited[0], waited[1].as_f64().unwrap()
+        );
+        assert!(idle >= 25, "the loop ran {idle} times in 500 ms between handlers");
+        assert_eq!(waited[0], 42);
+        assert!(waited[1].as_f64().unwrap() < 1.0);
+        assert!(during_busy >= 10, "the loop ran {during_busy} times in 500 ms of a busy handler");
+    }
+
     #[test]
     fn a_script_without_handler_marks_nothing() {
         let engine = PythonEngine::new().unwrap();
