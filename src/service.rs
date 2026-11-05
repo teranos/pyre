@@ -539,6 +539,8 @@ impl DomainPluginService for PythonPluginService {
         // declarations again.
         state.llm_handler = None;
         state.routes.clear();
+        // The config the node resolved, secrets among it, goes with them.
+        state.engine.set_plugin_config(&HashMap::new());
         Ok(Response::new(ShutdownResponse { stopped: true }))
     }
 
@@ -1846,6 +1848,26 @@ mod tests {
     // A second @llm function is not served, and its handler is not faulted:
     // a fault is attested and takes the whole handler, its watchers and
     // schedules with it, off every later load.
+    // A stopped plugin keeps none of the config the node resolved for it:
+    // its secrets among them, for anything still reaching /execute.
+    #[tokio::test]
+    async fn a_stopped_plugin_keeps_no_config() {
+        let service = PythonPluginService::new("otaripy").unwrap();
+        let dir = scratch_dir("stopped-config");
+        let mut request = bare_initialize(&dir);
+        request.config.insert("openrouter_api_key".to_string(), "resolved".to_string());
+        service.initialize(Request::new(request)).await.unwrap();
+        service.shutdown(Request::new(Empty {})).await.unwrap();
+
+        let read = service
+            .handlers
+            .handle_execute(serde_json::json!({"content": "print(len(plugin_config))"}))
+            .await
+            .unwrap();
+        let said: serde_json::Value = serde_json::from_slice(&read.body).unwrap();
+        assert_eq!(said["stdout"], "0\n", "{said}");
+    }
+
     #[tokio::test]
     async fn a_second_llm_function_is_not_served_and_not_faulted() {
         let service = PythonPluginService::new("otaripy").unwrap();
