@@ -493,10 +493,15 @@ impl DomainPluginService for PythonPluginService {
             );
         }
 
+        // Said only by a plugin whose Python declares @llm, so the node
+        // routes LLM calls to no pyre plugin that cannot answer them.
+        let llm_provider = self.handlers.state.read().llm_handler.is_some();
+
         Ok(Response::new(InitializeResponse {
             handler_names,
             schedules,
             watchers,
+            llm_provider,
             python_provider: true,
             ..Default::default()
         }))
@@ -1467,6 +1472,109 @@ mod tests {
 
         assert_eq!(refused.code(), tonic::Code::PermissionDenied);
         assert_eq!(refused.message(), "403 budget_exceeded");
+    }
+
+    /// An ATS store holding these handlers, as the node's answers
+    /// GetAttestations for predicate=handler. Only that RPC is answered.
+    struct HeldHandlers(Vec<(String, String)>);
+
+    #[tonic::async_trait]
+    impl crate::proto::ats_store_service_server::AtsStoreService for HeldHandlers {
+        async fn create_attestation(
+            &self,
+            _: Request<crate::proto::CreateAttestationRequest>,
+        ) -> Result<Response<crate::proto::CreateAttestationResponse>, Status> {
+            Err(Status::unimplemented("not held"))
+        }
+        async fn attestation_exists(
+            &self,
+            _: Request<crate::proto::AttestationExistsRequest>,
+        ) -> Result<Response<crate::proto::AttestationExistsResponse>, Status> {
+            Err(Status::unimplemented("not held"))
+        }
+        async fn generate_and_create_attestation(
+            &self,
+            _: Request<crate::proto::GenerateAttestationRequest>,
+        ) -> Result<Response<crate::proto::GenerateAttestationResponse>, Status> {
+            Err(Status::unimplemented("not held"))
+        }
+        async fn batch_generate_and_create_attestations(
+            &self,
+            _: Request<crate::proto::BatchGenerateAttestationRequest>,
+        ) -> Result<Response<crate::proto::BatchGenerateAttestationResponse>, Status> {
+            Err(Status::unimplemented("not held"))
+        }
+        async fn get_attestations(
+            &self,
+            _: Request<crate::proto::GetAttestationsRequest>,
+        ) -> Result<Response<crate::proto::GetAttestationsResponse>, Status> {
+            let attestations = self
+                .0
+                .iter()
+                .map(|(name, code)| {
+                    let mut attrs = HashMap::new();
+                    attrs.insert("code".to_string(), serde_json::Value::String(code.clone()));
+                    crate::proto::Attestation {
+                        subjects: vec![name.clone()],
+                        predicates: vec!["handler".to_string()],
+                        attributes: Some(qntx_proto::serde_struct::json_map_to_struct(&attrs)),
+                        ..Default::default()
+                    }
+                })
+                .collect();
+            Ok(Response::new(crate::proto::GetAttestationsResponse {
+                success: true,
+                error: String::new(),
+                attestations,
+            }))
+        }
+        type GetAttestationsStreamStream =
+            Pin<Box<dyn Stream<Item = Result<crate::proto::Attestation, Status>> + Send>>;
+        async fn get_attestations_stream(
+            &self,
+            _: Request<crate::proto::GetAttestationsRequest>,
+        ) -> Result<Response<Self::GetAttestationsStreamStream>, Status> {
+            Err(Status::unimplemented("not held"))
+        }
+    }
+
+    /// Where an ATS store holding these handlers answers.
+    async fn ats_holding(handlers: &[(&str, &str)]) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let held = HeldHandlers(
+            handlers
+                .iter()
+                .map(|(n, c)| (n.to_string(), c.to_string()))
+                .collect(),
+        );
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(crate::proto::ats_store_service_server::AtsStoreServiceServer::new(held))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+        );
+        address.to_string()
+    }
+
+    // Initialize, with the handlers read from ATS as the node holds them,
+    // tells the node it is an LLM provider when one of them declares @llm.
+    #[tokio::test]
+    async fn a_plugin_that_declares_an_llm_function_is_an_llm_provider() {
+        let service = PythonPluginService::new("otaripy").unwrap();
+        let dir = scratch_dir("llm");
+        let mut request = bare_initialize(&dir);
+        request.ats_store_endpoint = ats_holding(&[("gateway", ANSWERS)]).await;
+
+        let response = service
+            .initialize(Request::new(request))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(response.llm_provider);
+        assert!(response.handler_names.contains(&"otaripy.gateway".to_string()));
+        let answer = service.chat(Request::new(asked())).await.unwrap().into_inner();
+        assert_eq!(answer.content, "heard hi");
     }
 
     #[tokio::test]
