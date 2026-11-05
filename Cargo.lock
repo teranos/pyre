@@ -1701,8 +1701,9 @@ dependencies = [
 
 [[package]]
 name = "pyre"
-version = "0.22.0"
+version = "0.23.0"
 dependencies = [
+ "base64 0.22.1",
  "clap",
  "parking_lot",
  "prost",

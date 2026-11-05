@@ -523,10 +523,20 @@ impl DomainPluginService for PythonPluginService {
     ) -> Result<Response<HttpResponse>, Status> {
         let req = request.into_inner();
         // Strip query string from path before routing
-        let (path, _query) = req.path.split_once('?').unwrap_or((&req.path, ""));
+        let (path, query) = req.path.split_once('?').unwrap_or((&req.path, ""));
         let method = &req.method;
 
         debug!("HTTP request: {} {}", method, path);
+
+        // A route a handler declares is answered by it, body untouched:
+        // before the JSON parse below, which pyre's own paths need and a
+        // declared route's body need not pass.
+        if let Some((handler, function)) = self.route_for(method, path) {
+            let (path, query) = (path.to_string(), query.to_string());
+            return Ok(Response::new(
+                self.answer_route(handler, function, &req, &path, &query).await,
+            ));
+        }
 
         // Parse request body
         let body: serde_json::Value = if req.body.is_empty() {
@@ -795,9 +805,11 @@ impl PythonPluginService {
         handler: String,
         function: String,
         argument: serde_json::Value,
+        as_route: bool,
     ) -> Result<serde_json::Value, Status> {
         let state = self.handlers.state.clone();
-        tokio::task::spawn_blocking(move || {
+        #[allow(clippy::result_large_err)]
+        let call = move || -> Result<serde_json::Value, Status> {
             let state = state.read();
             let code = state.discovered_handlers.get(&handler).cloned().ok_or_else(|| {
                 Status::failed_precondition(format!("handler {handler} is no longer discovered"))
@@ -805,12 +817,12 @@ impl PythonPluginService {
             crate::atsstore::set_current_handler(Some(handler.clone()));
             crate::schedulestore::set_current_client(state.schedule_client.clone());
             crate::fetchstore::set_current_client(state.fetch_client.clone());
-            let answered = state.engine.call_declared(
-                &code,
-                &function,
-                &argument,
-                Some(state.ats_client.clone()),
-            );
+            let ats = Some(state.ats_client.clone());
+            let answered = if as_route {
+                state.engine.call_route(&code, &function, &argument, ats)
+            } else {
+                state.engine.call_declared(&code, &function, &argument, ats)
+            };
             crate::fetchstore::clear_current_client();
             crate::schedulestore::clear_current_client();
             crate::atsstore::set_current_handler(None);
@@ -818,9 +830,10 @@ impl PythonPluginService {
                 error!(handler = handler.as_str(), error = %e, "Declared function failed");
                 Status::internal(format!("{handler}.{function} failed: {e}"))
             })
-        })
-        .await
-        .map_err(|e| Status::internal(format!("the call did not finish: {e}")))?
+        };
+        tokio::task::spawn_blocking(call)
+            .await
+            .map_err(|e| Status::internal(format!("the call did not finish: {e}")))?
     }
 
     /// The node's LLM call, answered by the @llm function.
@@ -831,8 +844,79 @@ impl PythonPluginService {
         })?;
         let argument = serde_json::to_value(&request)
             .map_err(|e| Status::internal(format!("the request did not serialize: {e}")))?;
-        let answer = self.call_declared(handler, function, argument).await?;
+        let answer = self.call_declared(handler, function, argument, false).await?;
         llm_answer(&answer)
+    }
+
+    /// The @route function that serves this method and path, when one does.
+    fn route_for(&self, method: &str, path: &str) -> Option<(String, String)> {
+        self.handlers
+            .state
+            .read()
+            .routes
+            .iter()
+            .find(|(r, _)| r.method == method && r.path == path)
+            .map(|(r, handler)| (handler.clone(), r.handler_fn.clone()))
+    }
+
+    /// A request on a declared route, answered by its function. A function
+    /// that raises is a 500 whose body says why.
+    async fn answer_route(
+        &self,
+        handler: String,
+        function: String,
+        req: &HttpRequest,
+        path: &str,
+        query: &str,
+    ) -> HttpResponse {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let mut headers = serde_json::Map::new();
+        for h in &req.headers {
+            headers.insert(
+                h.name.to_lowercase(),
+                serde_json::Value::String(h.values.join(", ")),
+            );
+        }
+        let request = serde_json::json!({
+            "method": req.method,
+            "path": path,
+            "query": query,
+            "headers": headers,
+            "body_base64": b64.encode(&req.body),
+        });
+        let failed = |status: i32, message: String| HttpResponse {
+            status_code: status,
+            headers: vec![HttpHeader {
+                name: "Content-Type".to_string(),
+                values: vec!["application/json".to_string()],
+            }],
+            body: serde_json::to_vec(&serde_json::json!({ "error": message })).unwrap_or_default(),
+        };
+        let answer = match self.call_declared(handler, function, request, true).await {
+            Ok(a) => a,
+            Err(status) => return failed(500, status.message().to_string()),
+        };
+        let body = match b64.decode(answer["body_base64"].as_str().unwrap_or_default()) {
+            Ok(b) => b,
+            Err(e) => return failed(500, format!("the route's body did not decode: {e}")),
+        };
+        let headers = answer["headers"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(name, value)| HttpHeader {
+                        name: name.clone(),
+                        values: vec![value.as_str().unwrap_or_default().to_string()],
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        HttpResponse {
+            status_code: answer["status"].as_i64().unwrap_or(200) as i32,
+            headers,
+            body,
+        }
     }
 
     fn attest_faults(&self, faulted: &[(String, String)]) {
@@ -1218,6 +1302,7 @@ fn count(v: &serde_json::Value, key: &str) -> i32 {
 /// returns `content` and may return `model`, the token counts and `served`,
 /// each under its proto field name; or `error` with a gRPC `code` and a
 /// `message`, which the node receives as that status.
+#[allow(clippy::result_large_err)]
 fn llm_answer(answer: &serde_json::Value) -> Result<LlmChatResponse, Status> {
     if !answer["error"].is_null() {
         return Err(refused(&answer["error"]));
@@ -1575,6 +1660,91 @@ mod tests {
         assert!(response.handler_names.contains(&"otaripy.gateway".to_string()));
         let answer = service.chat(Request::new(asked())).await.unwrap().into_inner();
         assert_eq!(answer.content, "heard hi");
+    }
+
+    const ROUTES: &str = concat!(
+        "@route('POST', '/v1/chat/completions')\n",
+        "def completions(request):\n",
+        "    return {\n",
+        "        'status': 201,\n",
+        "        'headers': {'Content-Type': 'text/plain', 'Otari-Request-ID': 'req-2'},\n",
+        "        'body': '|'.join([request['method'], request['path'], request['query'],\n",
+        "                          request['headers'].get('x-qntx-asker-did', ''),\n",
+        "                          request['body'].decode()]),\n",
+        "    }\n",
+    );
+
+    fn post(path: &str, body: &[u8]) -> HttpRequest {
+        HttpRequest {
+            method: "POST".to_string(),
+            path: path.to_string(),
+            headers: vec![HttpHeader {
+                name: "X-Qntx-Asker-Did".to_string(),
+                values: vec!["did:key:z6Mke2eCaller".to_string()],
+            }],
+            body: body.to_vec(),
+        }
+    }
+
+    // A path a handler declares reaches it whole: method, path, query, the
+    // headers the node set (who it admitted among them) and the body as sent,
+    // here one that is not JSON. Its status, headers and body come back.
+    #[tokio::test]
+    async fn a_declared_route_is_answered_by_its_function() {
+        let service = serving(&[("gateway", ROUTES)]).await;
+        let response = service
+            .handle_http(Request::new(post("/v1/chat/completions?x=1", b"not json")))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.status_code, 201);
+        assert_eq!(
+            String::from_utf8(response.body).unwrap(),
+            "POST|/v1/chat/completions|x=1|did:key:z6Mke2eCaller|not json"
+        );
+        let header = |name: &str| {
+            response
+                .headers
+                .iter()
+                .find(|h| h.name == name)
+                .map(|h| h.values.clone())
+        };
+        assert_eq!(header("Otari-Request-ID"), Some(vec!["req-2".to_string()]));
+        assert_eq!(header("Content-Type"), Some(vec!["text/plain".to_string()]));
+    }
+
+    // A route is its method and its path: the same path asked another way is
+    // no route, and pyre's own paths stay pyre's.
+    #[tokio::test]
+    async fn a_route_is_its_method_and_its_path() {
+        let service = serving(&[("gateway", ROUTES)]).await;
+        let mut get = post("/v1/chat/completions", b"");
+        get.method = "GET".to_string();
+        let response = service.handle_http(Request::new(get)).await.unwrap().into_inner();
+        assert_eq!(response.status_code, 404);
+
+        let version = HttpRequest {
+            method: "GET".to_string(),
+            path: "/version".to_string(),
+            ..Default::default()
+        };
+        let response = service.handle_http(Request::new(version)).await.unwrap().into_inner();
+        assert_eq!(response.status_code, 200);
+    }
+
+    #[tokio::test]
+    async fn a_route_function_that_raises_is_a_500_that_says_why() {
+        let raises = "@route('POST', '/boom')\ndef boom(request):\n    raise RuntimeError('upstream gone')\n";
+        let service = serving(&[("gateway", raises)]).await;
+        let response = service
+            .handle_http(Request::new(post("/boom", b"{}")))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.status_code, 500);
+        assert!(String::from_utf8(response.body).unwrap().contains("upstream gone"));
     }
 
     #[tokio::test]

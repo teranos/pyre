@@ -688,8 +688,64 @@ class schedule:
         let call = format!(
             "{STUBS}\n{DECLARATION_STUBS}\n{code}\nimport json as _qntx_json\n_result = _qntx_json.dumps({function}(upstream))"
         );
+        self.run_call(&call, function, argument, ats_client)
+    }
+
+    /// Call a @route function with the request the node handed on. The
+    /// function gets method, path, query, headers (lower-case names, the
+    /// values of a repeated header joined by a comma and a space) and body
+    /// as bytes, and returns status, headers, and body as bytes or text.
+    /// Bodies cross as base64, so a body that is not JSON, or not text,
+    /// arrives as it was sent.
+    pub fn call_route(
+        &self,
+        code: &str,
+        function: &str,
+        request: &serde_json::Value,
+        ats_client: Option<SharedAtsStoreClient>,
+    ) -> Result<serde_json::Value, String> {
+        const STUBS: &str = r#"
+class handler:
+    def __init__(self, description=None): pass
+    def __call__(self, fn): return fn
+class watch:
+    def __init__(self, predicate, context=None): pass
+    def __call__(self, fn): return fn
+class schedule:
+    def __init__(self, every, description=None): pass
+    def __call__(self, fn): return fn
+"#;
+        const ROUTE: &str = r#"
+import base64 as _qntx_b64
+def _qntx_route(fn, req):
+    req = dict(req)
+    req['body'] = _qntx_b64.b64decode(req.pop('body_base64'))
+    resp = fn(req) or {}
+    body = resp.get('body', b'')
+    if isinstance(body, str):
+        body = body.encode()
+    headers = {str(k): str(v) for k, v in (resp.get('headers') or {}).items()}
+    return {
+        'status': int(resp.get('status', 200)),
+        'headers': headers,
+        'body_base64': _qntx_b64.b64encode(body).decode(),
+    }
+"#;
+        let call = format!(
+            "{STUBS}\n{DECLARATION_STUBS}\n{code}\n{ROUTE}\nimport json as _qntx_json\n_result = _qntx_json.dumps(_qntx_route({function}, upstream))"
+        );
+        self.run_call(&call, function, request, ats_client)
+    }
+
+    fn run_call(
+        &self,
+        call: &str,
+        function: &str,
+        argument: &serde_json::Value,
+        ats_client: Option<SharedAtsStoreClient>,
+    ) -> Result<serde_json::Value, String> {
         let result = self.execute_with_ats(
-            &call,
+            call,
             &ExecutionConfig::default(),
             ats_client,
             Some(argument),
