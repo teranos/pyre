@@ -24,9 +24,9 @@ fn extraction_failed(what: &str, result: &ExecutionResult) -> String {
     }
 }
 
-/// @llm and @route as every reading of a script other than their own sees
-/// them: decorators that change nothing. Without them a script that declares
-/// either raises NameError wherever pyre runs it to read something else.
+/// 「[Opus 5.5] @llm and @route as every reading of a script other than their own sees」
+/// 「[Opus 5.5] them: decorators that change nothing. Without them a script that declares」
+/// 「[Opus 5.5] either raises NameError wherever pyre runs it to read something else.」
 const DECLARATION_STUBS: &str = r#"
 class llm:
     def __init__(self, description=None): pass
@@ -37,9 +37,9 @@ class route:
     def __call__(self, fn): return fn
 "#;
 
-/// Puts sys.stdout and sys.stderr behind routes, once: each writes to the
-/// capture the running thread set, else to the stream it replaced. Code that
-/// replaces sys.stdout itself is routed again on the next execution.
+/// 「[Opus 5.5] Puts sys.stdout and sys.stderr behind routes, once: each writes to the」
+/// 「[Opus 5.5] capture the running thread set, else to the stream it replaced. Code that」
+/// 「[Opus 5.5] replaces sys.stdout itself is routed again on the next execution.」
 const ROUTED_OUTPUT: &std::ffi::CStr = cr#"
 import sys as _pyre_sys, threading as _pyre_threading, io as _pyre_io
 class _PyreRoute(_pyre_io.TextIOBase):
@@ -147,11 +147,11 @@ impl PythonEngine {
                 .call_method0("StringIO")
                 .map_err(|e| Error::context("failed to create stderr StringIO object", e))?;
 
-            // Output is captured per thread: sys.stdout and sys.stderr are
-            // routes that write to this thread's capture while it runs, and
-            // to the stream they replaced otherwise. Swapping sys.stdout
-            // itself gave one execution's prints to another running at once,
-            // and left a finished capture in place when two overlapped.
+            // 「[Opus 5.5] Output is captured per thread: sys.stdout and sys.stderr are」
+            // 「[Opus 5.5] routes that write to this thread's capture while it runs, and」
+            // 「[Opus 5.5] to the stream they replaced otherwise. Swapping sys.stdout」
+            // 「[Opus 5.5] itself gave one execution's prints to another running at once,」
+            // 「[Opus 5.5] and left a finished capture in place when two overlapped.」
             py.run(ROUTED_OUTPUT, None, None)
                 .map_err(|e| Error::context("failed to route sys.stdout and sys.stderr", e))?;
             let out_local = sys
@@ -190,7 +190,7 @@ impl PythonEngine {
                 let _ = path_list.insert(0, path);
             }
 
-            // The plugin's config, as the node handed it at Initialize.
+            // 「[Opus 5.5] The plugin's config, as the node handed it at Initialize.」
             let plugin_config = PyDict::new(py);
             for (key, value) in self.plugin_config() {
                 plugin_config.set_item(key, value).map_err(|e| {
@@ -243,7 +243,7 @@ impl PythonEngine {
             // Execute the code using py.run
             let exec_result = py.run(code_cstr.as_c_str(), Some(&globals), None);
 
-            // This thread's output goes where it went before it ran.
+            // 「[Opus 5.5] This thread's output goes where it went before it ran.」
             let _ = out_local.setattr("target", py.None());
             let _ = err_local.setattr("target", py.None());
 
@@ -485,8 +485,8 @@ class schedule:
             Err(e) if claims_decorator => return Err(e),
             Err(_) => return Ok(code.to_string()),
         }
-        // A module that only declares what it serves is read for that
-        // elsewhere; run as a script, its decorators still have to resolve.
+        // 「[Opus 5.5] A module that only declares what it serves is read for that」
+        // 「[Opus 5.5] elsewhere; run as a script, its decorators still have to resolve.」
         if code.contains("@llm") || code.contains("@route") {
             return Ok(format!("{STUBS}\n{code}\n{MAIN}"));
         }
@@ -617,8 +617,8 @@ class watch:
             .collect())
     }
 
-    /// What a script declares it serves: its @llm function and its @route
-    /// functions. Read by running the module, as @watch and @schedule are.
+    /// 「[Opus 5.5] What a script declares it serves: its @llm function and its @route」
+    /// 「[Opus 5.5] functions. Read by running the module, as @watch and @schedule are.」
     pub fn extract_declarations(&self, code: &str) -> Result<Declarations, String> {
         let preamble = r#"
 _qntx_llm = []
@@ -708,10 +708,10 @@ class route:
         })
     }
 
-    /// Call one function a script declares, with `argument` as its one
-    /// parameter, and return what it returned. Both cross as JSON. The module
-    /// runs first, as it does for every job, so the function is the one the
-    /// script defines now.
+    /// 「[Opus 5.5] Call one function a script declares, with `argument` as its one」
+    /// 「[Opus 5.5] parameter, and return what it returned. Both cross as JSON. The module」
+    /// 「[Opus 5.5] runs first, as it does for every job, so the function is the one the」
+    /// 「[Opus 5.5] script defines now.」
     pub fn call_declared(
         &self,
         code: &str,
@@ -736,12 +736,12 @@ class schedule:
         self.run_call(&call, function, argument, ats_client)
     }
 
-    /// Call a @route function with the request the node handed on. The
-    /// function gets method, path, query, headers (lower-case names, the
-    /// values of a repeated header joined by a comma and a space) and body
-    /// as bytes, and returns status, headers, and body as bytes or text.
-    /// Bodies cross as base64, so a body that is not JSON, or not text,
-    /// arrives as it was sent.
+    /// 「[Opus 5.5] Call a @route function with the request the node handed on. The」
+    /// 「[Opus 5.5] function gets method, path, query, headers (lower-case names, the」
+    /// 「[Opus 5.5] values of a repeated header joined by a comma and a space) and body」
+    /// 「[Opus 5.5] as bytes, and returns status, headers, and body as bytes or text.」
+    /// 「[Opus 5.5] Bodies cross as base64, so a body that is not JSON, or not text,」
+    /// 「[Opus 5.5] arrives as it was sent.」
     pub fn call_route(
         &self,
         code: &str,
@@ -1111,7 +1111,7 @@ mod tests {
         "    return {'status': 200, 'body': 'ok'}\n",
     );
 
-    // What a script serves is read off it, as what triggers it is.
+    // 「[Opus 5.5] What a script serves is read off it, as what triggers it is.」
     #[test]
     fn a_script_declares_its_llm_function_and_its_routes() {
         let engine = PythonEngine::new().unwrap();
@@ -1128,8 +1128,8 @@ mod tests {
         );
     }
 
-    // The other readings see @llm and @route as decorators that change
-    // nothing, so a script that declares them still reads for its triggers.
+    // 「[Opus 5.5] The other readings see @llm and @route as decorators that change」
+    // 「[Opus 5.5] nothing, so a script that declares them still reads for its triggers.」
     #[test]
     fn declaring_what_a_script_serves_leaves_its_triggers_readable() {
         let engine = PythonEngine::new().unwrap();
@@ -1152,7 +1152,7 @@ mod tests {
         assert_eq!(declared, crate::engine::Declarations::default());
     }
 
-    // The node has one place to send a plugin's LLM calls.
+    // 「[Opus 5.5] The node has one place to send a plugin's LLM calls.」
     #[test]
     fn a_script_declares_one_llm_function() {
         let engine = PythonEngine::new().unwrap();
@@ -1183,11 +1183,11 @@ mod tests {
         assert!(refused.contains("no model named"), "{refused}");
     }
 
-    // A server a plugin's Python keeps in process (otari's ASGI app, for one)
-    // lives on an asyncio loop in a thread of its own, started once. Asked of
-    // the interpreter as pyre runs it: whether that loop runs while no handler
-    // does, and whether a handler that waits on it is answered, since the
-    // handler holds the GIL for as long as it runs.
+    // 「[Opus 5.5] A server a plugin's Python keeps in process (otari's ASGI app, for one)」
+    // 「[Opus 5.5] lives on an asyncio loop in a thread of its own, started once. Asked of」
+    // 「[Opus 5.5] the interpreter as pyre runs it: whether that loop runs while no handler」
+    // 「[Opus 5.5] does, and whether a handler that waits on it is answered, since the」
+    // 「[Opus 5.5] handler holds the GIL for as long as it runs.」
     #[test]
     fn a_loop_started_once_serves_handlers_that_wait_on_it() {
         let engine = PythonEngine::new().unwrap();
@@ -1222,12 +1222,12 @@ mod tests {
         let r = engine.execute(start, &ExecutionConfig::default());
         assert!(r.success, "{:?}", r.error);
 
-        // Between handlers no Python runs and pyre holds no GIL.
+        // 「[Opus 5.5] Between handlers no Python runs and pyre holds no GIL.」
         let before = ticks(&engine);
         std::thread::sleep(std::time::Duration::from_millis(500));
         let idle = ticks(&engine) - before;
 
-        // A handler that waits on the loop, as a call into otari would.
+        // 「[Opus 5.5] A handler that waits on the loop, as a call into otari would.」
         let waits = concat!(
             "import sys, asyncio, time\n",
             "m = sys.modules['_pyre_loop_probe']\n",
@@ -1242,8 +1242,8 @@ mod tests {
         assert!(r.success, "{:?}", r.error);
         let waited = r.result.unwrap();
 
-        // A handler that computes and never waits: the loop gets the GIL only
-        // at the interpreter's switch interval.
+        // 「[Opus 5.5] A handler that computes and never waits: the loop gets the GIL only」
+        // 「[Opus 5.5] at the interpreter's switch interval.」
         let before = ticks(&engine);
         let busy = concat!(
             "import time\n",
@@ -1255,9 +1255,9 @@ mod tests {
         assert!(r.success, "{:?}", r.error);
         let during_busy = ticks(&engine) - before;
 
-        // Stopped and joined, so its ticks take no GIL from the other tests
-        // in this process: an execution captures output by swapping
-        // sys.stdout, and a thread switching in mid-run reads another's.
+        // 「[Opus 5.5] Stopped and joined, so its ticks take no GIL from the other tests」
+        // 「[Opus 5.5] in this process: an execution captures output by swapping」
+        // 「[Opus 5.5] sys.stdout, and a thread switching in mid-run reads another's.」
         let r = engine.execute(
             concat!(
                 "import sys\n",
@@ -1275,22 +1275,22 @@ mod tests {
             "loop probe: {idle} ticks in 500 ms idle; a waiting handler got {} after {:.3} s; {during_busy} ticks in 500 ms of a busy handler",
             waited[0], waited[1].as_f64().unwrap()
         );
-        // What a plugin keeping a server in process stands on: the loop runs
-        // between handlers, and a handler waiting on it is answered in the
-        // time the work takes. How often the loop runs beside a busy handler
-        // is the interpreter's switch interval against the machine's load
-        // (21 ticks alone on the laptop, 4 in a Nix build running the suite in
-        // parallel), so it is printed and not held to a number.
+        // 「[Opus 5.5] What a plugin keeping a server in process stands on: the loop runs」
+        // 「[Opus 5.5] between handlers, and a handler waiting on it is answered in the」
+        // 「[Opus 5.5] time the work takes. How often the loop runs beside a busy handler」
+        // 「[Opus 5.5] is the interpreter's switch interval against the machine's load」
+        // 「[Opus 5.5] (21 ticks alone on the laptop, 4 in a Nix build running the suite in」
+        // 「[Opus 5.5] parallel), so it is printed and not held to a number.」
         assert!(idle >= 10, "the loop ran {idle} times in 500 ms between handlers");
         assert_eq!(waited[0], 42);
         assert!(waited[1].as_f64().unwrap() < 1.0);
         assert!(during_busy > 0, "the loop never ran in 500 ms of a busy handler");
     }
 
-    // Two executions at once, on two threads, each waiting while the other
-    // prints: each captures its own output and nothing of the other's. A
-    // declared call runs on a blocking thread of its own, so executions
-    // overlap whenever one waits, as one waiting on otari does.
+    // 「[Opus 5.5] Two executions at once, on two threads, each waiting while the other」
+    // 「[Opus 5.5] prints: each captures its own output and nothing of the other's. A」
+    // 「[Opus 5.5] declared call runs on a blocking thread of its own, so executions」
+    // 「[Opus 5.5] overlap whenever one waits, as one waiting on otari does.」
     #[test]
     fn executions_at_once_capture_their_own_output() {
         let engine = std::sync::Arc::new(PythonEngine::new().unwrap());
