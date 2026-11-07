@@ -785,27 +785,31 @@ impl PythonService for PythonPluginService {
             })?)
         };
 
-        // Set element ID for actor convention
-        if !req.element_id.is_empty() {
-            crate::atsstore::set_current_glyph_id(Some(req.element_id.clone()));
-        }
-
         let config = crate::engine::ExecutionConfig {
             timeout_secs: 30,
             ..Default::default()
         };
 
-        let result = {
-            let state = self.handlers.state.read();
-            state.engine.execute_with_ats(
+        let shared = self.handlers.state.clone();
+        let result = crate::handlers::off_the_workers(move || {
+            // Set element ID for actor convention. It is thread-local, so it
+            // is set on the thread that runs the code.
+            if !req.element_id.is_empty() {
+                crate::atsstore::set_current_glyph_id(Some(req.element_id.clone()));
+            }
+
+            let state = shared.read();
+            let result = state.engine.execute_with_ats(
                 &req.code,
                 &config,
                 Some(state.ats_client.clone()),
                 upstream.as_ref(),
-            )
-        };
+            );
 
-        crate::atsstore::set_current_glyph_id(None);
+            crate::atsstore::set_current_glyph_id(None);
+            result
+        })
+        .await?;
 
         // Empty bytes read as "the handler returned nothing", which is a
         // different fact from "the result could not be serialized".
@@ -1233,15 +1237,17 @@ impl PythonPluginService {
             ..Default::default()
         };
 
-        let result = {
-            let state = self.handlers.state.read();
+        let shared = self.handlers.state.clone();
+        let result = crate::handlers::off_the_workers(move || {
+            let state = shared.read();
             state.engine.execute_with_ats(
                 &payload.content,
                 &config,
                 Some(state.ats_client.clone()),
                 None,
             )
-        };
+        })
+        .await?;
 
         // Convert execution result to ExecuteJobResponse
         if result.success {
@@ -1339,9 +1345,13 @@ impl PythonPluginService {
         // Said before and after, because a handler that never came back is
         // the one worth knowing about, and the file showed nothing of it.
         info!(handler = handler_key, "Handler started");
-        let result = {
-            let state = self.handlers.state.read();
-            crate::atsstore::set_current_handler(Some(handler_key.to_string()));
+        let shared = self.handlers.state.clone();
+        let handler_name = handler_key.to_string();
+        let result = crate::handlers::off_the_workers(move || {
+            // All of these are thread-local, so they are set on the thread
+            // that runs the handler.
+            let state = shared.read();
+            crate::atsstore::set_current_handler(Some(handler_name));
             crate::schedulestore::set_current_client(state.schedule_client.clone());
             crate::fetchstore::set_current_client(state.fetch_client.clone());
             let r = state.engine.execute_with_ats(
@@ -1354,7 +1364,8 @@ impl PythonPluginService {
             crate::schedulestore::clear_current_client();
             crate::atsstore::set_current_handler(None);
             r
-        };
+        })
+        .await?;
 
         // Convert execution result to ExecuteJobResponse
         if result.success {
@@ -2128,32 +2139,32 @@ except RuntimeError as e:
     #[tokio::test]
     async fn a_handler_supplies_the_context_its_code_never_passed() {
         let service = PythonPluginService::new("pyre").unwrap();
+        // The name is thread-local, so it is set on the thread that runs the
+        // code, as execute_discovered_handler_job does. The HTTP door runs on
+        // a thread of its own and would not see it.
         atsstore::set_current_handler(Some("mp004_request_ad_renders".to_string()));
 
-        let body = serde_json::json!({
-            "content": r#"
+        let code = r#"
 try:
     attest(['ad:7'], ['render:requested'])
     print('ERROR: should have raised')
 except RuntimeError as e:
     print('raised:', str(e))
-"#,
-            "timeout_secs": 5
-        });
-
-        let result = service.handlers.handle_execute(body).await.unwrap();
+"#;
+        let result = {
+            let state = service.handlers.state.read();
+            state.engine.execute_with_ats(
+                code,
+                &crate::engine::ExecutionConfig::default(),
+                Some(state.ats_client.clone()),
+                None,
+            )
+        };
         atsstore::set_current_handler(None);
 
-        #[derive(Deserialize)]
-        struct ExecutionResponse {
-            success: bool,
-            stdout: String,
-        }
-
-        let response: ExecutionResponse = serde_json::from_slice(&result.body).unwrap();
-        assert!(response.success);
-        assert!(response.stdout.contains("not initialized"), "{}", response.stdout);
-        assert!(!response.stdout.contains("no context"), "{}", response.stdout);
+        assert!(result.success);
+        assert!(result.stdout.contains("not initialized"), "{}", result.stdout);
+        assert!(!result.stdout.contains("no context"), "{}", result.stdout);
     }
 
     /// The HTTP door is not a handler, so it has no name to lend. Writing an
@@ -2242,5 +2253,95 @@ except RuntimeError as e:
         let response: ExecutionResponse = serde_json::from_slice(&result.body).unwrap();
         assert!(response.success);
         assert!(response.stdout.contains("Got expected error"));
+    }
+
+    // Ramps concurrent /execute calls until Health stops answering in time, and
+    // prints one line per level so the break is observed rather than guessed.
+    // The runtime is multi-threaded and sized as `#[tokio::main]` sizes the
+    // plugin: one worker per core. Each call holds the GIL for
+    // PYRE_STRESS_HOLD_MS (default 1000), which is what a busy handler does.
+    // The bound is PYRE_STRESS_HEALTH_MS (default 2000).
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "pushes the runtime until it fails; run on purpose"]
+    async fn health_keeps_answering_as_executions_pile_up() {
+        let hold_ms: u64 = std::env::var("PYRE_STRESS_HOLD_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1000);
+        let bound = std::time::Duration::from_millis(
+            std::env::var("PYRE_STRESS_HEALTH_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(2000),
+        );
+        let service = std::sync::Arc::new(PythonPluginService::new("python").unwrap());
+        let script = format!(
+            "import time\nend = time.time() + {}\nwhile time.time() < end:\n    pass\n",
+            hold_ms as f64 / 1000.0
+        );
+
+        eprintln!(
+            "workers={} hold_ms={hold_ms} health_bound_ms={}",
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
+            bound.as_millis()
+        );
+        eprintln!("level\tok\tfailed\twall_ms\tmax_health_ms");
+
+        let mut broke_at = None;
+        for level in [1usize, 2, 4, 8, 16, 32, 64, 128, 256] {
+            let started = std::time::Instant::now();
+            let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+            let poller = {
+                let (service, done) = (service.clone(), done.clone());
+                tokio::spawn(async move {
+                    let mut worst = std::time::Duration::ZERO;
+                    while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                        let asked = std::time::Instant::now();
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        let _ = service.health(Request::new(Empty {})).await;
+                        worst = worst.max(asked.elapsed().saturating_sub(std::time::Duration::from_millis(50)));
+                    }
+                    worst
+                })
+            };
+
+            let calls: Vec<_> = (0..level)
+                .map(|_| {
+                    let (service, script) = (service.clone(), script.clone());
+                    tokio::spawn(async move {
+                        service
+                            .handlers
+                            .handle_execute(serde_json::json!({ "content": script }))
+                            .await
+                    })
+                })
+                .collect();
+
+            let (mut ok, mut failed) = (0, 0);
+            for call in calls {
+                match call.await {
+                    Ok(Ok(_)) => ok += 1,
+                    _ => failed += 1,
+                }
+            }
+            let wall = started.elapsed();
+            done.store(true, std::sync::atomic::Ordering::SeqCst);
+            let worst = poller.await.unwrap();
+
+            eprintln!("{level}\t{ok}\t{failed}\t{}\t{}", wall.as_millis(), worst.as_millis());
+            if failed > 0 || worst > bound {
+                broke_at = Some((level, failed, worst));
+                break;
+            }
+        }
+
+        if let Some((level, failed, worst)) = broke_at {
+            panic!(
+                "broke at {level} concurrent executions: {failed} failed, Health waited {}ms (bound {}ms)",
+                worst.as_millis(),
+                bound.as_millis()
+            );
+        }
     }
 }
