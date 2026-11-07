@@ -30,7 +30,7 @@ pyo3 = { version = "0.24", features = ["auto-initialize"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# A declared route's bodies cross into Python as base64, so they arrive as sent.
+# 「[Opus 5.5] A declared route's bodies cross into Python as base64, so they arrive as sent.」
 base64 = "0.22"
 
 # Logging
