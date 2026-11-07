@@ -1,9 +1,9 @@
-//! RoomsService for a plugin whose Python declares @rooms (ADR-057): the rooms
-//! a plugin provides.
+//! 「[Opus 5.5] RoomsService for a plugin whose Python declares @rooms (ADR-057): the rooms」
+//! 「[Opus 5.5] a plugin provides.」
 //!
-//! The @rooms function is called with one dict, holding call (the RPC's name)
-//! and request (its request), and returns the response as a dict. A dict that
-//! carries error refuses the call with it.
+//! 「[Opus 5.5] The @rooms function is called with one dict, holding call (the RPC's name)」
+//! 「[Opus 5.5] and request (its request), and returns the response as a dict. A dict that」
+//! 「[Opus 5.5] carries error refuses the call with it.」
 
 use crate::proto::{
     rooms_service_server::RoomsService, CreateRoomRequest, CreateRoomResponse, GetRoomRequest,
@@ -19,7 +19,7 @@ use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
 impl PythonPluginService {
-    /// One room call, answered by the @rooms function.
+    /// 「[Opus 5.5] One room call, answered by the @rooms function.」
     async fn answer_rooms<Q: Serialize, A: DeserializeOwned>(
         &self,
         call: &str,
@@ -102,8 +102,8 @@ impl RoomsService for PythonPluginService {
 
     type StreamRoomArrivalsStream = Pin<Box<dyn Stream<Item = Result<RoomArrival, Status>> + Send>>;
 
-    /// A @rooms function returns once, so it carries no stream: what arrives is
-    /// read from the room (ReadRoom).
+    /// 「[Opus 5.5] A @rooms function returns once, so it carries no stream: what arrives is」
+    /// 「[Opus 5.5] read from the room (ReadRoom).」
     async fn stream_room_arrivals(
         &self,
         _request: Request<StreamRoomArrivalsRequest>,
