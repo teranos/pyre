@@ -24,24 +24,24 @@ pub struct WatcherInfo {
     pub contexts: Vec<String>,
 }
 
-/// An HTTP route a handler serves, from @route(method, path)
+/// 「[Opus 5.5] An HTTP route a handler serves, from @route(method, path)」
 #[derive(Debug, Clone, PartialEq)]
 pub struct RouteInfo {
-    /// Function name that answers the route
+    /// 「[Opus 5.5] Function name that answers the route」
     pub handler_fn: String,
-    /// HTTP method, upper case
+    /// 「[Opus 5.5] HTTP method, upper case」
     pub method: String,
-    /// Path below /api/{plugin}, as the node hands it on
+    /// 「[Opus 5.5] Path below /api/{plugin}, as the node hands it on」
     pub path: String,
 }
 
-/// What a script declares it serves, beside what triggers it: the function
-/// that answers the node's LLM calls (@llm) and the HTTP routes (@route).
+/// 「[Opus 5.5] What a script declares it serves, beside what triggers it: the function」
+/// 「[Opus 5.5] that answers the node's LLM calls (@llm) and the HTTP routes (@route).」
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Declarations {
-    /// Function name of the @llm handler, when the script has one
+    /// 「[Opus 5.5] Function name of the @llm handler, when the script has one」
     pub llm: Option<String>,
-    /// Routes the script serves
+    /// 「[Opus 5.5] Routes the script serves」
     pub routes: Vec<RouteInfo>,
 }
 
@@ -130,7 +130,7 @@ pub(crate) struct EngineState {
     /// install needs somewhere it may actually write.
     pub site_dir: Option<String>,
 
-    /// The plugin's config from Initialize, read by Python as plugin_config.
+    /// 「[Opus 5.5] The plugin's config from Initialize, read by Python as plugin_config.」
     pub plugin_config: HashMap<String, String>,
 }
 
@@ -223,16 +223,16 @@ impl PythonEngine {
     }
 
     /// Check if a Python module is available
-    /// Keep the plugin's config, as the node handed it at Initialize, for
-    /// every execution to read as the global `plugin_config`. The node has
-    /// resolved each ssm:/// and env: value before it arrives here. Kept on
-    /// the engine, not in the interpreter's builtins, so it is this plugin's
-    /// and no other engine's in the same process.
+    /// 「[Opus 5.5] Keep the plugin's config, as the node handed it at Initialize, for」
+    /// 「[Opus 5.5] every execution to read as the global `plugin_config`. The node has」
+    /// 「[Opus 5.5] resolved each ssm:/// and env: value before it arrives here. Kept on」
+    /// 「[Opus 5.5] the engine, not in the interpreter's builtins, so it is this plugin's」
+    /// 「[Opus 5.5] and no other engine's in the same process.」
     pub fn set_plugin_config(&self, config: &HashMap<String, String>) {
         self.state.lock().plugin_config = config.clone();
     }
 
-    /// The plugin's config as Initialize left it.
+    /// 「[Opus 5.5] The plugin's config as Initialize left it.」
     pub fn plugin_config(&self) -> HashMap<String, String> {
         self.state.lock().plugin_config.clone()
     }
