@@ -1138,7 +1138,7 @@ mod tests {
         "    return {'status': 200, 'body': 'ok'}\n",
     );
 
-    // The rooms a plugin provides are read off its @rooms function.
+    // 「[Opus 5.5] The rooms a plugin provides are read off its @rooms function.」
     #[test]
     fn a_script_declares_its_rooms_function() {
         let engine = PythonEngine::new().unwrap();

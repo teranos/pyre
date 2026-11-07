@@ -519,8 +519,8 @@ impl DomainPluginService for PythonPluginService {
         // Said only by a plugin whose Python declares @llm, so the node
         // routes LLM calls to no pyre plugin that cannot answer them.
         let llm_provider = self.handlers.state.read().llm_handler.is_some();
-        // "rooms will be plugin provided": said only by a plugin whose Python
-        // declares @rooms.
+        // 「[Opus 5.5] "rooms will be plugin provided": said only by a plugin whose Python」
+        // 「[Opus 5.5] declares @rooms.」
         let rooms_provider = self.handlers.state.read().rooms_handler.is_some();
 
         Ok(Response::new(InitializeResponse {
@@ -839,8 +839,8 @@ impl PythonPluginService {
             }
         }
 
-        // One @rooms function holds the plugin's rooms: the one holding them now
-        // while its handler still declares it, else the first by name, as @llm.
+        // 「[Opus 5.5] One @rooms function holds the plugin's rooms: the one holding them now」
+        // 「[Opus 5.5] while its handler still declares it, else the first by name, as @llm.」
         let rooms_incumbent = self.handlers.state.read().rooms_handler.clone();
         let declares_rooms = |handler: &str| {
             read.iter()
