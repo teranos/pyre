@@ -24,6 +24,27 @@ pub struct WatcherInfo {
     pub contexts: Vec<String>,
 }
 
+/// An HTTP route a handler serves, from @route(method, path)
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteInfo {
+    /// Function name that answers the route
+    pub handler_fn: String,
+    /// HTTP method, upper case
+    pub method: String,
+    /// Path below /api/{plugin}, as the node hands it on
+    pub path: String,
+}
+
+/// What a script declares it serves, beside what triggers it: the function
+/// that answers the node's LLM calls (@llm) and the HTTP routes (@route).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Declarations {
+    /// Function name of the @llm handler, when the script has one
+    pub llm: Option<String>,
+    /// Routes the script serves
+    pub routes: Vec<RouteInfo>,
+}
+
 /// Schedule metadata extracted from a @schedule-decorated handler function
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScheduleMetadata {
@@ -108,6 +129,9 @@ pub(crate) struct EngineState {
     /// because those are read-only store paths under Nix, and a runtime
     /// install needs somewhere it may actually write.
     pub site_dir: Option<String>,
+
+    /// The plugin's config from Initialize, read by Python as plugin_config.
+    pub plugin_config: HashMap<String, String>,
 }
 
 /// Python execution engine
@@ -134,6 +158,7 @@ impl PythonEngine {
                 initialized: false,
                 python_paths: Vec::new(),
                 site_dir: None,
+                plugin_config: HashMap::new(),
             })),
             version,
         })
@@ -198,6 +223,20 @@ impl PythonEngine {
     }
 
     /// Check if a Python module is available
+    /// Keep the plugin's config, as the node handed it at Initialize, for
+    /// every execution to read as the global `plugin_config`. The node has
+    /// resolved each ssm:/// and env: value before it arrives here. Kept on
+    /// the engine, not in the interpreter's builtins, so it is this plugin's
+    /// and no other engine's in the same process.
+    pub fn set_plugin_config(&self, config: &HashMap<String, String>) {
+        self.state.lock().plugin_config = config.clone();
+    }
+
+    /// The plugin's config as Initialize left it.
+    pub fn plugin_config(&self) -> HashMap<String, String> {
+        self.state.lock().plugin_config.clone()
+    }
+
     pub fn check_module(&self, module_name: &str) -> bool {
         Python::with_gil(|py| py.import(module_name).is_ok())
     }

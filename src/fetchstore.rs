@@ -55,12 +55,18 @@ impl FetchClient {
         let request = qntx_proto::FetchRequest {
             auth_token,
             url: url.to_string(),
-            subjects: attest.subjects,
-            predicate: attest.predicate,
-            context: attest.context,
             fresh: attest.fresh,
-            actor: attest.actor,
-            source: attest.source,
+            record: Some(qntx_proto::fetch_request::Record::Attest(qntx_proto::FetchRecord {
+                subjects: attest.subjects,
+                predicate: attest.predicate,
+                context: attest.context,
+                by: Some(if attest.actor.is_empty() {
+                    qntx_proto::fetch_record::By::Node(true)
+                } else {
+                    qntx_proto::fetch_record::By::Actor(attest.actor)
+                }),
+                source: attest.source,
+            })),
         };
 
         let response = std::thread::spawn(move || {

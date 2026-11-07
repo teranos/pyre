@@ -3,7 +3,7 @@
 //! Provides execution capabilities for the PythonEngine.
 
 use crate::atsstore::{self, SharedAtsStoreClient};
-use crate::engine::{ExecutionConfig, ExecutionResult, PythonEngine, WatcherInfo};
+use crate::engine::{Declarations, ExecutionConfig, ExecutionResult, PythonEngine, WatcherInfo};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use qntx_grpc::error::Error;
@@ -23,6 +23,45 @@ fn extraction_failed(what: &str, result: &ExecutionResult) -> String {
         )
     }
 }
+
+/// @llm and @route as every reading of a script other than their own sees
+/// them: decorators that change nothing. Without them a script that declares
+/// either raises NameError wherever pyre runs it to read something else.
+const DECLARATION_STUBS: &str = r#"
+class llm:
+    def __init__(self, description=None): pass
+    def __call__(self, fn): return fn
+
+class route:
+    def __init__(self, method, path): pass
+    def __call__(self, fn): return fn
+"#;
+
+/// Puts sys.stdout and sys.stderr behind routes, once: each writes to the
+/// capture the running thread set, else to the stream it replaced. Code that
+/// replaces sys.stdout itself is routed again on the next execution.
+const ROUTED_OUTPUT: &std::ffi::CStr = cr#"
+import sys as _pyre_sys, threading as _pyre_threading, io as _pyre_io
+class _PyreRoute(_pyre_io.TextIOBase):
+    def __init__(self, base):
+        self._pyre_base = base
+        self._pyre_local = _pyre_threading.local()
+    def _pyre_to(self):
+        return getattr(self._pyre_local, 'target', None) or self._pyre_base
+    def write(self, s):
+        return self._pyre_to().write(s)
+    def flush(self):
+        return self._pyre_to().flush()
+    def writable(self):
+        return True
+    @property
+    def encoding(self):
+        return getattr(self._pyre_to(), 'encoding', 'utf-8')
+for _pyre_name in ('stdout', 'stderr'):
+    _pyre_now = getattr(_pyre_sys, _pyre_name)
+    if not hasattr(_pyre_now, '_pyre_local'):
+        setattr(_pyre_sys, _pyre_name, _PyreRoute(_pyre_now))
+"#;
 
 /// Maximum length for captured variable values before truncation
 const MAX_VARIABLE_LENGTH: usize = 1000;
@@ -108,19 +147,27 @@ impl PythonEngine {
                 .call_method0("StringIO")
                 .map_err(|e| Error::context("failed to create stderr StringIO object", e))?;
 
-            // Save original stdout/stderr
-            let original_stdout = sys
+            // Output is captured per thread: sys.stdout and sys.stderr are
+            // routes that write to this thread's capture while it runs, and
+            // to the stream they replaced otherwise. Swapping sys.stdout
+            // itself gave one execution's prints to another running at once,
+            // and left a finished capture in place when two overlapped.
+            py.run(ROUTED_OUTPUT, None, None)
+                .map_err(|e| Error::context("failed to route sys.stdout and sys.stderr", e))?;
+            let out_local = sys
                 .getattr("stdout")
-                .map_err(|e| Error::context("failed to get original sys.stdout", e))?;
-            let original_stderr = sys
+                .and_then(|s| s.getattr("_pyre_local"))
+                .map_err(|e| Error::context("sys.stdout is not pyre's route", e))?;
+            let err_local = sys
                 .getattr("stderr")
-                .map_err(|e| Error::context("failed to get original sys.stderr", e))?;
-
-            // Redirect stdout/stderr
-            sys.setattr("stdout", &stdout_capture)
-                .map_err(|e| Error::context("failed to redirect sys.stdout to StringIO", e))?;
-            sys.setattr("stderr", &stderr_capture)
-                .map_err(|e| Error::context("failed to redirect sys.stderr to StringIO", e))?;
+                .and_then(|s| s.getattr("_pyre_local"))
+                .map_err(|e| Error::context("sys.stderr is not pyre's route", e))?;
+            out_local
+                .setattr("target", &stdout_capture)
+                .map_err(|e| Error::context("failed to capture this thread's stdout", e))?;
+            err_local
+                .setattr("target", &stderr_capture)
+                .map_err(|e| Error::context("failed to capture this thread's stderr", e))?;
 
             // Create execution globals
             let globals = PyDict::new(py);
@@ -142,6 +189,17 @@ impl PythonEngine {
                     .map_err(|e| Error::context("failed to extract sys.path as list", e))?;
                 let _ = path_list.insert(0, path);
             }
+
+            // The plugin's config, as the node handed it at Initialize.
+            let plugin_config = PyDict::new(py);
+            for (key, value) in self.plugin_config() {
+                plugin_config.set_item(key, value).map_err(|e| {
+                    Error::context("failed to set an entry of plugin_config", e)
+                })?;
+            }
+            globals.set_item("plugin_config", plugin_config).map_err(|e| {
+                Error::context("failed to set plugin_config in execution globals", e)
+            })?;
 
             // Inject attest()/last() if an ATSStore client is available
             if inject_attest {
@@ -185,9 +243,9 @@ impl PythonEngine {
             // Execute the code using py.run
             let exec_result = py.run(code_cstr.as_c_str(), Some(&globals), None);
 
-            // Restore stdout/stderr
-            let _ = sys.setattr("stdout", original_stdout);
-            let _ = sys.setattr("stderr", original_stderr);
+            // This thread's output goes where it went before it ran.
+            let _ = out_local.setattr("target", py.None());
+            let _ = err_local.setattr("target", py.None());
 
             // Get captured output
             let stdout: String = stdout_capture
@@ -323,7 +381,7 @@ class schedule:
     def __call__(self, fn): return fn
 "#;
 
-        let full_code = format!("{}\n{}", preamble, code);
+        let full_code = format!("{}\n{}\n{}", preamble, DECLARATION_STUBS, code);
         let config = ExecutionConfig {
             capture_variables: true,
             ..Default::default()
@@ -336,8 +394,8 @@ class schedule:
         // Extract _qntx_watchers from the execution result
         // Re-execute to get the list as JSON
         let extract_code = format!(
-            "{}\n{}\nimport json\n_result = json.dumps(_qntx_watchers)",
-            preamble, code
+            "{}\n{}\n{}\nimport json\n_result = json.dumps(_qntx_watchers)",
+            preamble, DECLARATION_STUBS, code
         );
         let result = self.execute(&extract_code, &ExecutionConfig::default());
         if !result.success {
@@ -388,6 +446,12 @@ class schedule:
             "class schedule:\n",
             "    def __init__(self, every, description=None): pass\n",
             "    def __call__(self, fn): return fn\n",
+            "class llm:\n",
+            "    def __init__(self, description=None): pass\n",
+            "    def __call__(self, fn): return fn\n",
+            "class route:\n",
+            "    def __init__(self, method, path): pass\n",
+            "    def __call__(self, fn): return fn\n",
         );
 
         // Extraction runs the module to find decorators, so a plain script
@@ -421,6 +485,11 @@ class schedule:
             Err(e) if claims_decorator => return Err(e),
             Err(_) => return Ok(code.to_string()),
         }
+        // A module that only declares what it serves is read for that
+        // elsewhere; run as a script, its decorators still have to resolve.
+        if code.contains("@llm") || code.contains("@route") {
+            return Ok(format!("{STUBS}\n{code}\n{MAIN}"));
+        }
         Ok(format!("{code}\n{MAIN}"))
     }
 
@@ -448,8 +517,8 @@ class watch:
 "#;
 
         let extract_code = format!(
-            "{}\n{}\nimport json\n_result = json.dumps(_qntx_handler)",
-            preamble, code
+            "{}\n{}\n{}\nimport json\n_result = json.dumps(_qntx_handler)",
+            preamble, DECLARATION_STUBS, code
         );
         let result = self.execute(&extract_code, &ExecutionConfig::default());
         if !result.success {
@@ -508,8 +577,8 @@ class watch:
 "#;
 
         let extract_code = format!(
-            "{}\n{}\nimport json\n_result = json.dumps(_qntx_schedules)",
-            preamble, code
+            "{}\n{}\n{}\nimport json\n_result = json.dumps(_qntx_schedules)",
+            preamble, DECLARATION_STUBS, code
         );
         let result = self.execute(&extract_code, &ExecutionConfig::default());
         if !result.success {
@@ -546,6 +615,194 @@ class watch:
                 })
             })
             .collect())
+    }
+
+    /// What a script declares it serves: its @llm function and its @route
+    /// functions. Read by running the module, as @watch and @schedule are.
+    pub fn extract_declarations(&self, code: &str) -> Result<Declarations, String> {
+        let preamble = r#"
+_qntx_llm = []
+_qntx_routes = []
+
+class handler:
+    def __init__(self, description=None): pass
+    def __call__(self, fn): return fn
+
+class watch:
+    def __init__(self, predicate, context=None): pass
+    def __call__(self, fn): return fn
+
+class schedule:
+    def __init__(self, every, description=None): pass
+    def __call__(self, fn): return fn
+
+class llm:
+    def __init__(self, description=None): pass
+    def __call__(self, fn):
+        _qntx_llm.append(fn.__name__)
+        return fn
+
+class route:
+    def __init__(self, method, path):
+        self._method = method
+        self._path = path
+    def __call__(self, fn):
+        _qntx_routes.append({
+            'handler_fn': fn.__name__,
+            'method': str(self._method).upper(),
+            'path': str(self._path),
+        })
+        return fn
+"#;
+
+        let extract_code = format!(
+            "{}\n{}\nimport json\n_result = json.dumps({{'llm': _qntx_llm, 'routes': _qntx_routes}})",
+            preamble, code
+        );
+        let result = self.execute(&extract_code, &ExecutionConfig::default());
+        if !result.success {
+            return Err(extraction_failed("@llm and @route", &result));
+        }
+
+        let read: serde_json::Value = match result.result {
+            Some(serde_json::Value::String(ref s)) => serde_json::from_str(s).map_err(|e| {
+                format!("failed to parse the @llm and @route extraction result: {e}")
+            })?,
+            other => {
+                return Err(format!(
+                    "the @llm and @route extraction returned no usable result: {other:?}"
+                ))
+            }
+        };
+
+        let llm: Vec<String> = read["llm"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        if llm.len() > 1 {
+            return Err(format!(
+                "a script declares one @llm function, and this one declares {}: {}",
+                llm.len(),
+                llm.join(", ")
+            ));
+        }
+
+        let routes = read["routes"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|entry| {
+                        Some(crate::engine::RouteInfo {
+                            handler_fn: entry.get("handler_fn")?.as_str()?.to_string(),
+                            method: entry.get("method")?.as_str()?.to_string(),
+                            path: entry.get("path")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(Declarations {
+            llm: llm.into_iter().next(),
+            routes,
+        })
+    }
+
+    /// Call one function a script declares, with `argument` as its one
+    /// parameter, and return what it returned. Both cross as JSON. The module
+    /// runs first, as it does for every job, so the function is the one the
+    /// script defines now.
+    pub fn call_declared(
+        &self,
+        code: &str,
+        function: &str,
+        argument: &serde_json::Value,
+        ats_client: Option<SharedAtsStoreClient>,
+    ) -> Result<serde_json::Value, String> {
+        const STUBS: &str = r#"
+class handler:
+    def __init__(self, description=None): pass
+    def __call__(self, fn): return fn
+class watch:
+    def __init__(self, predicate, context=None): pass
+    def __call__(self, fn): return fn
+class schedule:
+    def __init__(self, every, description=None): pass
+    def __call__(self, fn): return fn
+"#;
+        let call = format!(
+            "{STUBS}\n{DECLARATION_STUBS}\n{code}\nimport json as _qntx_json\n_result = _qntx_json.dumps({function}(upstream))"
+        );
+        self.run_call(&call, function, argument, ats_client)
+    }
+
+    /// Call a @route function with the request the node handed on. The
+    /// function gets method, path, query, headers (lower-case names, the
+    /// values of a repeated header joined by a comma and a space) and body
+    /// as bytes, and returns status, headers, and body as bytes or text.
+    /// Bodies cross as base64, so a body that is not JSON, or not text,
+    /// arrives as it was sent.
+    pub fn call_route(
+        &self,
+        code: &str,
+        function: &str,
+        request: &serde_json::Value,
+        ats_client: Option<SharedAtsStoreClient>,
+    ) -> Result<serde_json::Value, String> {
+        const STUBS: &str = r#"
+class handler:
+    def __init__(self, description=None): pass
+    def __call__(self, fn): return fn
+class watch:
+    def __init__(self, predicate, context=None): pass
+    def __call__(self, fn): return fn
+class schedule:
+    def __init__(self, every, description=None): pass
+    def __call__(self, fn): return fn
+"#;
+        const ROUTE: &str = r#"
+import base64 as _qntx_b64
+def _qntx_route(fn, req):
+    req = dict(req)
+    req['body'] = _qntx_b64.b64decode(req.pop('body_base64'))
+    resp = fn(req) or {}
+    body = resp.get('body', b'')
+    if isinstance(body, str):
+        body = body.encode()
+    headers = {str(k): str(v) for k, v in (resp.get('headers') or {}).items()}
+    return {
+        'status': int(resp.get('status', 200)),
+        'headers': headers,
+        'body_base64': _qntx_b64.b64encode(body).decode(),
+    }
+"#;
+        let call = format!(
+            "{STUBS}\n{DECLARATION_STUBS}\n{code}\n{ROUTE}\nimport json as _qntx_json\n_result = _qntx_json.dumps(_qntx_route({function}, upstream))"
+        );
+        self.run_call(&call, function, request, ats_client)
+    }
+
+    fn run_call(
+        &self,
+        call: &str,
+        function: &str,
+        argument: &serde_json::Value,
+        ats_client: Option<SharedAtsStoreClient>,
+    ) -> Result<serde_json::Value, String> {
+        let result = self.execute_with_ats(
+            call,
+            &ExecutionConfig::default(),
+            ats_client,
+            Some(argument),
+        );
+        if !result.success {
+            return Err(result.error.unwrap_or_else(|| "no reason given".to_string()));
+        }
+        match result.result {
+            Some(serde_json::Value::String(ref s)) => serde_json::from_str(s)
+                .map_err(|e| format!("{function} returned what is not JSON: {e}")),
+            other => Err(format!("{function} returned nothing usable: {other:?}")),
+        }
     }
 
     /// Install a package into the engine's site directory, at runtime. A wheel
@@ -842,6 +1099,217 @@ mod tests {
 
         assert!(result.success, "{:?}", result.error);
         assert_eq!(result.stdout.trim(), "tick");
+    }
+
+    const SERVES: &str = concat!(
+        "@llm()\n",
+        "def chat(request):\n",
+        "    return {'content': 'heard ' + request['model'], 'model': request['model']}\n",
+        "\n",
+        "@route('post', '/v1/chat/completions')\n",
+        "def completions(request):\n",
+        "    return {'status': 200, 'body': 'ok'}\n",
+    );
+
+    // What a script serves is read off it, as what triggers it is.
+    #[test]
+    fn a_script_declares_its_llm_function_and_its_routes() {
+        let engine = PythonEngine::new().unwrap();
+        let declared = engine.extract_declarations(SERVES).unwrap();
+
+        assert_eq!(declared.llm.as_deref(), Some("chat"));
+        assert_eq!(
+            declared.routes,
+            vec![crate::engine::RouteInfo {
+                handler_fn: "completions".to_string(),
+                method: "POST".to_string(),
+                path: "/v1/chat/completions".to_string(),
+            }]
+        );
+    }
+
+    // The other readings see @llm and @route as decorators that change
+    // nothing, so a script that declares them still reads for its triggers.
+    #[test]
+    fn declaring_what_a_script_serves_leaves_its_triggers_readable() {
+        let engine = PythonEngine::new().unwrap();
+
+        assert!(engine.extract_watchers(SERVES).unwrap().is_empty());
+        assert!(engine.extract_schedules(SERVES).unwrap().is_empty());
+        assert_eq!(engine.extract_handler(SERVES).unwrap(), None);
+        let ready = engine.prepared(SERVES).unwrap();
+        let result = engine.execute(&ready, &ExecutionConfig::default());
+        assert!(result.success, "{:?}", result.error);
+    }
+
+    #[test]
+    fn a_script_without_declarations_declares_nothing() {
+        let engine = PythonEngine::new().unwrap();
+        let declared = engine
+            .extract_declarations("@schedule(every=60)\ndef tick():\n    pass\n")
+            .unwrap();
+
+        assert_eq!(declared, crate::engine::Declarations::default());
+    }
+
+    // The node has one place to send a plugin's LLM calls.
+    #[test]
+    fn a_script_declares_one_llm_function() {
+        let engine = PythonEngine::new().unwrap();
+        let two = "@llm()\ndef a(r):\n    pass\n@llm()\ndef b(r):\n    pass\n";
+
+        let refused = engine.extract_declarations(two).unwrap_err();
+        assert!(refused.contains("a, b"), "{refused}");
+    }
+
+    #[test]
+    fn a_declared_function_is_called_with_its_argument() {
+        let engine = PythonEngine::new().unwrap();
+        let answer = engine
+            .call_declared(SERVES, "chat", &serde_json::json!({"model": "m"}), None)
+            .unwrap();
+
+        assert_eq!(answer, serde_json::json!({"content": "heard m", "model": "m"}));
+    }
+
+    #[test]
+    fn a_declared_function_that_raises_says_why() {
+        let engine = PythonEngine::new().unwrap();
+        let script = "@llm()\ndef chat(request):\n    raise ValueError('no model named')\n";
+        let refused = engine
+            .call_declared(script, "chat", &serde_json::json!({}), None)
+            .unwrap_err();
+
+        assert!(refused.contains("no model named"), "{refused}");
+    }
+
+    // A server a plugin's Python keeps in process (otari's ASGI app, for one)
+    // lives on an asyncio loop in a thread of its own, started once. Asked of
+    // the interpreter as pyre runs it: whether that loop runs while no handler
+    // does, and whether a handler that waits on it is answered, since the
+    // handler holds the GIL for as long as it runs.
+    #[test]
+    fn a_loop_started_once_serves_handlers_that_wait_on_it() {
+        let engine = PythonEngine::new().unwrap();
+        let start = concat!(
+            "import sys, types, asyncio, threading, time\n",
+            "if '_pyre_loop_probe' not in sys.modules:\n",
+            "    m = types.ModuleType('_pyre_loop_probe')\n",
+            "    m.ticks = 0\n",
+            "    m.loop = asyncio.new_event_loop()\n",
+            "    async def tick():\n",
+            "        while True:\n",
+            "            m.ticks += 1\n",
+            "            await asyncio.sleep(0.01)\n",
+            "    def run():\n",
+            "        asyncio.set_event_loop(m.loop)\n",
+            "        m.loop.create_task(tick())\n",
+            "        m.loop.run_forever()\n",
+            "    m.thread = threading.Thread(target=run, daemon=True)\n",
+            "    m.thread.start()\n",
+            "    sys.modules['_pyre_loop_probe'] = m\n",
+            "    time.sleep(0.05)\n",
+        );
+        let ticks = |engine: &PythonEngine| -> i64 {
+            let r = engine.execute(
+                "import sys\n_result = sys.modules['_pyre_loop_probe'].ticks\n",
+                &ExecutionConfig::default(),
+            );
+            assert!(r.success, "{:?}", r.error);
+            r.result.unwrap().as_i64().unwrap()
+        };
+
+        let r = engine.execute(start, &ExecutionConfig::default());
+        assert!(r.success, "{:?}", r.error);
+
+        // Between handlers no Python runs and pyre holds no GIL.
+        let before = ticks(&engine);
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let idle = ticks(&engine) - before;
+
+        // A handler that waits on the loop, as a call into otari would.
+        let waits = concat!(
+            "import sys, asyncio, time\n",
+            "m = sys.modules['_pyre_loop_probe']\n",
+            "async def answer():\n",
+            "    await asyncio.sleep(0.2)\n",
+            "    return 42\n",
+            "t = time.monotonic()\n",
+            "got = asyncio.run_coroutine_threadsafe(answer(), m.loop).result(timeout=5)\n",
+            "_result = [got, time.monotonic() - t]\n",
+        );
+        let r = engine.execute(waits, &ExecutionConfig::default());
+        assert!(r.success, "{:?}", r.error);
+        let waited = r.result.unwrap();
+
+        // A handler that computes and never waits: the loop gets the GIL only
+        // at the interpreter's switch interval.
+        let before = ticks(&engine);
+        let busy = concat!(
+            "import time\n",
+            "t = time.monotonic()\n",
+            "while time.monotonic() - t < 0.5:\n",
+            "    pass\n",
+        );
+        let r = engine.execute(busy, &ExecutionConfig::default());
+        assert!(r.success, "{:?}", r.error);
+        let during_busy = ticks(&engine) - before;
+
+        // Stopped and joined, so its ticks take no GIL from the other tests
+        // in this process: an execution captures output by swapping
+        // sys.stdout, and a thread switching in mid-run reads another's.
+        let r = engine.execute(
+            concat!(
+                "import sys\n",
+                "m = sys.modules.pop('_pyre_loop_probe')\n",
+                "m.loop.call_soon_threadsafe(m.loop.stop)\n",
+                "m.thread.join(timeout=5)\n",
+                "_result = m.thread.is_alive()\n",
+            ),
+            &ExecutionConfig::default(),
+        );
+        assert!(r.success, "{:?}", r.error);
+        assert_eq!(r.result, Some(serde_json::Value::Bool(false)));
+
+        println!(
+            "loop probe: {idle} ticks in 500 ms idle; a waiting handler got {} after {:.3} s; {during_busy} ticks in 500 ms of a busy handler",
+            waited[0], waited[1].as_f64().unwrap()
+        );
+        // What a plugin keeping a server in process stands on: the loop runs
+        // between handlers, and a handler waiting on it is answered in the
+        // time the work takes. How often the loop runs beside a busy handler
+        // is the interpreter's switch interval against the machine's load
+        // (21 ticks alone on the laptop, 4 in a Nix build running the suite in
+        // parallel), so it is printed and not held to a number.
+        assert!(idle >= 10, "the loop ran {idle} times in 500 ms between handlers");
+        assert_eq!(waited[0], 42);
+        assert!(waited[1].as_f64().unwrap() < 1.0);
+        assert!(during_busy > 0, "the loop never ran in 500 ms of a busy handler");
+    }
+
+    // Two executions at once, on two threads, each waiting while the other
+    // prints: each captures its own output and nothing of the other's. A
+    // declared call runs on a blocking thread of its own, so executions
+    // overlap whenever one waits, as one waiting on otari does.
+    #[test]
+    fn executions_at_once_capture_their_own_output() {
+        let engine = std::sync::Arc::new(PythonEngine::new().unwrap());
+        let script = |me: &str| {
+            format!(
+                "import time\nfor i in range(20):\n    print('{me}')\n    time.sleep(0.005)\n"
+            )
+        };
+        let run = |me: &'static str| {
+            let engine = engine.clone();
+            let code = script(me);
+            std::thread::spawn(move || engine.execute(&code, &ExecutionConfig::default()))
+        };
+        let (a, b) = (run("a"), run("b"));
+        let (a, b) = (a.join().unwrap(), b.join().unwrap());
+
+        assert!(a.success && b.success, "{:?} {:?}", a.error, b.error);
+        assert_eq!(a.stdout, "a\n".repeat(20));
+        assert_eq!(b.stdout, "b\n".repeat(20));
     }
 
     #[test]

@@ -11,11 +11,13 @@ use crate::config::PluginConfig;
 use crate::engine::PythonEngine;
 use crate::handlers::{HandlerContext, PluginState};
 use crate::proto::{
-    domain_plugin_service_server::DomainPluginService, python_service_server::PythonService,
-    ConfigSchemaResponse, Empty, ExecuteJobRequest, ExecuteJobResponse, GlyphDefResponse,
-    HealthResponse, HttpHeader, HttpRequest, HttpResponse, InitializeRequest, InitializeResponse,
-    MetadataResponse, ParseAxQueryRequest, ParseAxQueryResponse, PythonExecuteRequest,
-    PythonExecuteResponse, ScheduleInfo, WatcherRegistration, WebSocketMessage,
+    domain_plugin_service_server::DomainPluginService, llm_chat_chunk,
+    llm_service_server::LlmService, python_service_server::PythonService, LlmChatChunk,
+    LlmChatRequest, LlmChatResponse, LlmServed,
+    service_endpoint, ConfigSchemaResponse, ElementDefResponse, Empty, ExecuteJobRequest,
+    ExecuteJobResponse, HealthResponse, HttpHeader, HttpRequest, HttpResponse, InitializeRequest,
+    InitializeResponse, MetadataResponse, PythonExecuteRequest, PythonExecuteResponse,
+    ScheduleInfo, ServiceEndpoint, ShutdownResponse, WatcherRegistration, WebSocketMessage,
 };
 use crate::version::version;
 use parking_lot::RwLock;
@@ -28,6 +30,28 @@ use tracing::{debug, error, info, warn};
 
 /// Default timeout for Python job execution (5 minutes)
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
+
+/// The paths handle_http answers itself, by method.
+const PYRE_PATHS: &[(&str, &str)] = &[
+    ("POST", "/execute"),
+    ("POST", "/evaluate"),
+    ("POST", "/execute-file"),
+    ("POST", "/uv/install"),
+    ("POST", "/pip/install"),
+    ("GET", "/uv/check"),
+    ("GET", "/pip/check"),
+    ("GET", "/version"),
+    ("GET", "/modules"),
+];
+
+/// Where a service the node runs answers, when it does. A service the node
+/// runs without says why instead, and that is no endpoint to dial.
+fn answering(endpoint: &Option<ServiceEndpoint>) -> Option<String> {
+    match endpoint.as_ref()?.state.as_ref()? {
+        service_endpoint::State::Address(address) if !address.is_empty() => Some(address.clone()),
+        _ => None,
+    }
+}
 
 /// Python plugin gRPC service
 pub struct PythonPluginService {
@@ -57,6 +81,8 @@ impl PythonPluginService {
             schedule_client: crate::schedulestore::new_shared_client(),
             fetch_client: crate::fetchstore::new_shared_client(),
             discovered_handlers: HashMap::new(),
+            llm_handler: None,
+            routes: vec![],
             telemetry: None,
         }));
 
@@ -78,7 +104,7 @@ impl PythonPluginService {
         config: Option<PluginConfig>,
     ) -> HashMap<String, String> {
         use crate::proto::{
-            ats_store_service_client::AtsStoreServiceClient, AttestationFilter,
+            ats_store_service_client::AtsStoreServiceClient, attestation_filter, AttestationFilter,
             GetAttestationsRequest,
         };
         use tonic::transport::Channel;
@@ -107,9 +133,9 @@ impl PythonPluginService {
             predicates: vec!["handler".to_string(), "handler:faulted".to_string()],
             contexts: vec![self.name.clone()],
             actors: vec![],
-            time_start: None,
-            time_end: None,
-            limit: Some(200),
+            from: Some(attestation_filter::From::UnboundedStart(true)),
+            to: Some(attestation_filter::To::UnboundedEnd(true)),
+            limit: 200,
         };
 
         let request = GetAttestationsRequest {
@@ -270,7 +296,7 @@ impl DomainPluginService for PythonPluginService {
                 ats_store_endpoint: req.ats_store_endpoint.clone(),
                 queue_endpoint: req.queue_endpoint,
                 schedule_endpoint: req.schedule_endpoint.clone(),
-                fetch_endpoint: req.fetch_endpoint.clone(),
+                fetch_endpoint: answering(&req.fetch_endpoint).unwrap_or_default(),
                 auth_token: req.auth_token.clone(),
                 config: req.config,
             });
@@ -300,12 +326,12 @@ impl DomainPluginService for PythonPluginService {
             }
 
             // Initialize Fetch client if endpoint is provided
-            if !req.fetch_endpoint.is_empty() {
+            if let Some(endpoint) = answering(&req.fetch_endpoint) {
                 debug!("Initializing Fetch client for Python HTTP fetching");
                 crate::fetchstore::init_shared_client(
                     &state.fetch_client,
                     crate::fetchstore::FetchConfig {
-                        endpoint: req.fetch_endpoint,
+                        endpoint,
                         auth_token: req.auth_token,
                     },
                 );
@@ -353,6 +379,9 @@ impl DomainPluginService for PythonPluginService {
                 )));
             }
 
+            let config = state.config.as_ref().map(|c| c.config.clone()).unwrap_or_default();
+            state.engine.set_plugin_config(&config);
+
             state.initialized = true;
             let py_version = state.engine.python_version();
 
@@ -368,6 +397,7 @@ impl DomainPluginService for PythonPluginService {
             let mut state = self.handlers.state.write();
             state.discovered_handlers = discovered_handlers.clone();
         }
+        let mut faulted = self.declare(&discovered_handlers);
 
         // Announce async handler capabilities
         // Start with built-in handlers
@@ -376,11 +406,16 @@ impl DomainPluginService for PythonPluginService {
         // Extract @watch and @schedule decorator metadata from discovered handlers
         let mut watchers = vec![];
         let mut schedules = vec![];
-        let mut faulted: Vec<(String, String)> = vec![];
         let mut sorted_handlers: Vec<_> = discovered_handlers.keys().collect();
         sorted_handlers.sort();
         for handler_name in &sorted_handlers {
             handler_names.push(format!("{}.{}", self.name, handler_name));
+
+            // Faulted already, by reading what it serves: running the module
+            // again would fault it a second time for the same reason.
+            if faulted.iter().any(|(n, _)| n == *handler_name) {
+                continue;
+            }
 
             if let Some(code) = discovered_handlers.get(*handler_name) {
                 let state = self.handlers.state.read();
@@ -431,7 +466,6 @@ impl DomainPluginService for PythonPluginService {
                         interval_seconds: s.interval_seconds,
                         enabled_by_default: true,
                         description: s.description,
-                        ats_code: String::new(),
                     });
                 }
             }
@@ -481,22 +515,33 @@ impl DomainPluginService for PythonPluginService {
             );
         }
 
+        // Said only by a plugin whose Python declares @llm, so the node
+        // routes LLM calls to no pyre plugin that cannot answer them.
+        let llm_provider = self.handlers.state.read().llm_handler.is_some();
+
         Ok(Response::new(InitializeResponse {
             handler_names,
             schedules,
             watchers,
+            llm_provider,
             python_provider: true,
             ..Default::default()
         }))
     }
 
     /// Shutdown the plugin
-    async fn shutdown(&self, _request: Request<Empty>) -> Result<Response<Empty>, Status> {
+    async fn shutdown(&self, _request: Request<Empty>) -> Result<Response<ShutdownResponse>, Status> {
         info!("Shutting down Python plugin");
         let mut state = self.handlers.state.write();
         state.initialized = false;
         state.config = None;
-        Ok(Response::new(Empty {}))
+        // A stopped plugin serves nothing it declared; Initialize reads the
+        // declarations again.
+        state.llm_handler = None;
+        state.routes.clear();
+        // The config the node resolved, secrets among it, goes with them.
+        state.engine.set_plugin_config(&HashMap::new());
+        Ok(Response::new(ShutdownResponse { stopped: true }))
     }
 
     /// Handle HTTP requests - routes to appropriate handler
@@ -506,10 +551,20 @@ impl DomainPluginService for PythonPluginService {
     ) -> Result<Response<HttpResponse>, Status> {
         let req = request.into_inner();
         // Strip query string from path before routing
-        let (path, _query) = req.path.split_once('?').unwrap_or((&req.path, ""));
+        let (path, query) = req.path.split_once('?').unwrap_or((&req.path, ""));
         let method = &req.method;
 
         debug!("HTTP request: {} {}", method, path);
+
+        // A route a handler declares is answered by it, body untouched:
+        // before the JSON parse below, which pyre's own paths need and a
+        // declared route's body need not pass.
+        if let Some((handler, function)) = self.route_for(method, path) {
+            let (path, query) = (path.to_string(), query.to_string());
+            return Ok(Response::new(
+                self.answer_route(handler, function, &req, &path, &query).await,
+            ));
+        }
 
         // Parse request body
         let body: serde_json::Value = if req.body.is_empty() {
@@ -616,20 +671,12 @@ impl DomainPluginService for PythonPluginService {
         }))
     }
 
-    /// Register custom glyph types (none for Python plugin)
-    async fn register_glyphs(
+    /// Register custom element types (none for Python plugin)
+    async fn register_elements(
         &self,
         _request: Request<Empty>,
-    ) -> Result<Response<GlyphDefResponse>, Status> {
-        Ok(Response::new(GlyphDefResponse { glyphs: vec![] }))
-    }
-
-    /// Parse an Ax query (not implemented — kern handles parsing)
-    async fn parse_ax_query(
-        &self,
-        _request: Request<ParseAxQueryRequest>,
-    ) -> Result<Response<ParseAxQueryResponse>, Status> {
-        Err(Status::unimplemented("ParseAxQuery is handled by kern"))
+    ) -> Result<Response<ElementDefResponse>, Status> {
+        Ok(Response::new(ElementDefResponse { elements: vec![] }))
     }
 
     /// Execute an async job
@@ -690,9 +737,9 @@ impl PythonService for PythonPluginService {
             })?)
         };
 
-        // Set glyph ID for actor convention
-        if !req.glyph_id.is_empty() {
-            crate::atsstore::set_current_glyph_id(Some(req.glyph_id.clone()));
+        // Set element ID for actor convention
+        if !req.element_id.is_empty() {
+            crate::atsstore::set_current_glyph_id(Some(req.element_id.clone()));
         }
 
         let config = crate::engine::ExecutionConfig {
@@ -734,6 +781,207 @@ impl PythonPluginService {
     /// Put each unreadable handler where something other than the journal can
     /// find it. A fault names the handler and why, in the plugin's own context,
     /// so `predicate=handler:faulted` answers what `crowbar` used to.
+    /// Read what each handler declares it serves, and keep it: the one @llm
+    /// function, and every @route. A handler whose declarations cannot be
+    /// read, or that declares a second @llm, is faulted and serves nothing.
+    fn declare(&self, handlers: &HashMap<String, String>) -> Vec<(String, String)> {
+        let mut faulted = vec![];
+        let mut names: Vec<_> = handlers.keys().collect();
+        names.sort();
+        let mut read = vec![];
+        for name in names {
+            let declared = {
+                let state = self.handlers.state.read();
+                state.engine.extract_declarations(&handlers[name])
+            };
+            match declared {
+                Ok(d) => read.push((name.clone(), d)),
+                Err(e) => {
+                    error!("handler {name} did not load: {e}");
+                    faulted.push((name.clone(), e));
+                }
+            }
+        }
+
+        // One @llm function answers the node's LLM calls: the one answering
+        // them now while its handler still declares it, else the first by
+        // name. Another is not served, and its handler is not faulted for it:
+        // a fault takes the whole handler off every later load.
+        let incumbent = self.handlers.state.read().llm_handler.clone();
+        let declares_llm = |handler: &str| {
+            read.iter()
+                .find(|(n, d)| n == handler && d.llm.is_some())
+                .map(|(n, d)| (n.clone(), d.llm.clone().unwrap_or_default()))
+        };
+        let llm_handler = incumbent
+            .and_then(|(handler, _)| declares_llm(&handler))
+            .or_else(|| {
+                read.iter()
+                    .find(|(_, d)| d.llm.is_some())
+                    .map(|(n, d)| (n.clone(), d.llm.clone().unwrap_or_default()))
+            });
+        if let Some((handler, function)) = &llm_handler {
+            info!("LLM: {}.{} answers the node's LLM calls", handler, function);
+        }
+        for (name, d) in &read {
+            if let (Some(function), Some((serving, _))) = (&d.llm, &llm_handler) {
+                if name != serving {
+                    error!(
+                        "{name}.{function} is not served: {serving} answers the node's LLM calls, and a plugin has one @llm function"
+                    );
+                }
+            }
+        }
+
+        // A route is one method and path, answered by one function, and pyre's
+        // own paths are pyre's. A declaration of either is not kept.
+        let mut routes: Vec<(crate::engine::RouteInfo, String)> = vec![];
+        for (name, d) in read {
+            for route in d.routes {
+                let pair = (route.method.as_str(), route.path.as_str());
+                if PYRE_PATHS.contains(&pair) {
+                    error!("{} {} via {}.{} is not served: it is pyre's own path", route.method, route.path, name, route.handler_fn);
+                    continue;
+                }
+                if let Some((_, first)) = routes
+                    .iter()
+                    .find(|(r, _)| r.method == route.method && r.path == route.path)
+                {
+                    error!("{} {} via {}.{} is not served: {} declares it already", route.method, route.path, name, route.handler_fn, first);
+                    continue;
+                }
+                info!("Route: {} {} via {}.{}", route.method, route.path, name, route.handler_fn);
+                routes.push((route, name.clone()));
+            }
+        }
+
+        let mut state = self.handlers.state.write();
+        state.llm_handler = llm_handler;
+        state.routes = routes;
+        faulted
+    }
+
+    /// Call a function a handler declares, off the async workers: a call
+    /// holds the interpreter for as long as the function runs.
+    async fn call_declared(
+        &self,
+        handler: String,
+        function: String,
+        argument: serde_json::Value,
+        as_route: bool,
+    ) -> Result<serde_json::Value, Status> {
+        let state = self.handlers.state.clone();
+        #[allow(clippy::result_large_err)]
+        let call = move || -> Result<serde_json::Value, Status> {
+            let state = state.read();
+            let code = state.discovered_handlers.get(&handler).cloned().ok_or_else(|| {
+                Status::failed_precondition(format!("handler {handler} is no longer discovered"))
+            })?;
+            crate::atsstore::set_current_handler(Some(handler.clone()));
+            crate::schedulestore::set_current_client(state.schedule_client.clone());
+            crate::fetchstore::set_current_client(state.fetch_client.clone());
+            let ats = Some(state.ats_client.clone());
+            let answered = if as_route {
+                state.engine.call_route(&code, &function, &argument, ats)
+            } else {
+                state.engine.call_declared(&code, &function, &argument, ats)
+            };
+            crate::fetchstore::clear_current_client();
+            crate::schedulestore::clear_current_client();
+            crate::atsstore::set_current_handler(None);
+            answered.map_err(|e| {
+                error!(handler = handler.as_str(), error = %e, "Declared function failed");
+                Status::internal(format!("{handler}.{function} failed: {e}"))
+            })
+        };
+        tokio::task::spawn_blocking(call)
+            .await
+            .map_err(|e| Status::internal(format!("the call did not finish: {e}")))?
+    }
+
+    /// The node's LLM call, answered by the @llm function.
+    async fn answer_llm(&self, request: LlmChatRequest) -> Result<LlmChatResponse, Status> {
+        let declared = self.handlers.state.read().llm_handler.clone();
+        let (handler, function) = declared.ok_or_else(|| {
+            Status::unimplemented(format!("{} declares no @llm function", self.name))
+        })?;
+        let argument = serde_json::to_value(&request)
+            .map_err(|e| Status::internal(format!("the request did not serialize: {e}")))?;
+        let answer = self.call_declared(handler, function, argument, false).await?;
+        llm_answer(&answer)
+    }
+
+    /// The @route function that serves this method and path, when one does.
+    fn route_for(&self, method: &str, path: &str) -> Option<(String, String)> {
+        self.handlers
+            .state
+            .read()
+            .routes
+            .iter()
+            .find(|(r, _)| r.method == method && r.path == path)
+            .map(|(r, handler)| (handler.clone(), r.handler_fn.clone()))
+    }
+
+    /// A request on a declared route, answered by its function. A function
+    /// that raises is a 500 whose body says why.
+    async fn answer_route(
+        &self,
+        handler: String,
+        function: String,
+        req: &HttpRequest,
+        path: &str,
+        query: &str,
+    ) -> HttpResponse {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let mut headers = serde_json::Map::new();
+        for h in &req.headers {
+            headers.insert(
+                h.name.to_lowercase(),
+                serde_json::Value::String(h.values.join(", ")),
+            );
+        }
+        let request = serde_json::json!({
+            "method": req.method,
+            "path": path,
+            "query": query,
+            "headers": headers,
+            "body_base64": b64.encode(&req.body),
+        });
+        let failed = |status: i32, message: String| HttpResponse {
+            status_code: status,
+            headers: vec![HttpHeader {
+                name: "Content-Type".to_string(),
+                values: vec!["application/json".to_string()],
+            }],
+            body: serde_json::to_vec(&serde_json::json!({ "error": message })).unwrap_or_default(),
+        };
+        let answer = match self.call_declared(handler, function, request, true).await {
+            Ok(a) => a,
+            Err(status) => return failed(500, status.message().to_string()),
+        };
+        let body = match b64.decode(answer["body_base64"].as_str().unwrap_or_default()) {
+            Ok(b) => b,
+            Err(e) => return failed(500, format!("the route's body did not decode: {e}")),
+        };
+        let headers = answer["headers"]
+            .as_object()
+            .map(|m| {
+                m.iter()
+                    .map(|(name, value)| HttpHeader {
+                        name: name.clone(),
+                        values: vec![value.as_str().unwrap_or_default().to_string()],
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        HttpResponse {
+            status_code: answer["status"].as_i64().unwrap_or(200) as i32,
+            headers,
+            body,
+        }
+    }
+
     fn attest_faults(&self, faulted: &[(String, String)]) {
         if faulted.is_empty() {
             return;
@@ -865,8 +1113,10 @@ impl PythonPluginService {
 
         {
             let mut state = self.handlers.state.write();
-            state.discovered_handlers = new_handlers;
+            state.discovered_handlers = new_handlers.clone();
         }
+        let faulted = self.declare(&new_handlers);
+        self.attest_faults(&faulted);
 
         info!("Hot-reloaded {} handler(s) from ATS store", count);
 
@@ -879,7 +1129,6 @@ impl PythonPluginService {
             .unwrap_or_default(),
             progress_current: 0,
             progress_total: 0,
-            cost_actual: 0.0,
             log_entries: vec![],
             plugin_version: version().to_string(),
         }))
@@ -945,8 +1194,7 @@ impl PythonPluginService {
                 result: result_bytes,
                 progress_current: 0,
                 progress_total: 0,
-                cost_actual: 0.0,
-                log_entries: vec![],
+                    log_entries: vec![],
                 plugin_version: version().to_string(),
             }))
         } else {
@@ -959,8 +1207,7 @@ impl PythonPluginService {
                 result: vec![],
                 progress_current: 0,
                 progress_total: 0,
-                cost_actual: 0.0,
-                log_entries: vec![],
+                    log_entries: vec![],
                 plugin_version: version().to_string(),
             }))
         }
@@ -1061,8 +1308,7 @@ impl PythonPluginService {
                 result: result_bytes,
                 progress_current: 0,
                 progress_total: 0,
-                cost_actual: 0.0,
-                log_entries: vec![],
+                    log_entries: vec![],
                 plugin_version: version().to_string(),
             }))
         } else {
@@ -1083,11 +1329,104 @@ impl PythonPluginService {
                 result: vec![],
                 progress_current: 0,
                 progress_total: 0,
-                cost_actual: 0.0,
-                log_entries: vec![],
+                    log_entries: vec![],
                 plugin_version: version().to_string(),
             }))
         }
+    }
+}
+
+/// The status a refusal the @llm function returned names, by its gRPC name.
+fn refused(error: &serde_json::Value) -> Status {
+    let message = error["message"].as_str().unwrap_or_default().to_string();
+    match error["code"].as_str().unwrap_or_default() {
+        "INVALID_ARGUMENT" => Status::invalid_argument(message),
+        "UNAUTHENTICATED" => Status::unauthenticated(message),
+        "PERMISSION_DENIED" => Status::permission_denied(message),
+        "NOT_FOUND" => Status::not_found(message),
+        "FAILED_PRECONDITION" => Status::failed_precondition(message),
+        "RESOURCE_EXHAUSTED" => Status::resource_exhausted(message),
+        "UNAVAILABLE" => Status::unavailable(message),
+        "ABORTED" => Status::aborted(message),
+        "DEADLINE_EXCEEDED" => Status::deadline_exceeded(message),
+        other => Status::internal(format!("refused with code {other:?}: {message}")),
+    }
+}
+
+fn text(v: &serde_json::Value, key: &str) -> String {
+    v[key].as_str().unwrap_or_default().to_string()
+}
+
+fn count(v: &serde_json::Value, key: &str) -> i32 {
+    v[key].as_i64().unwrap_or(0) as i32
+}
+
+/// What the @llm function returned, as the node's LLMChatResponse. It
+/// returns `content` and may return `model`, the token counts and `served`,
+/// each under its proto field name; or `error` with a gRPC `code` and a
+/// `message`, which the node receives as that status.
+#[allow(clippy::result_large_err)]
+fn llm_answer(answer: &serde_json::Value) -> Result<LlmChatResponse, Status> {
+    if !answer["error"].is_null() {
+        return Err(refused(&answer["error"]));
+    }
+    let content = answer["content"]
+        .as_str()
+        .ok_or_else(|| Status::internal("the @llm function returned no content"))?
+        .to_string();
+    let s = &answer["served"];
+    let served = s.as_object().map(|_| LlmServed {
+        requested_provider: text(s, "requested_provider"),
+        requested_model: text(s, "requested_model"),
+        upstream_provider: text(s, "upstream_provider"),
+        executed_model: text(s, "executed_model"),
+        response_model: text(s, "response_model"),
+        request_id: text(s, "request_id"),
+        cost_usd: s["cost_usd"].as_str().map(String::from),
+        pricing_source: text(s, "pricing_source"),
+        attempt_count: count(s, "attempt_count"),
+        fallback: s["fallback"].as_bool().unwrap_or(false),
+    });
+    Ok(LlmChatResponse {
+        content,
+        model: text(answer, "model"),
+        prompt_tokens: count(answer, "prompt_tokens"),
+        completion_tokens: count(answer, "completion_tokens"),
+        total_tokens: count(answer, "total_tokens"),
+        served,
+    })
+}
+
+#[tonic::async_trait]
+impl LlmService for PythonPluginService {
+    async fn chat(
+        &self,
+        request: Request<LlmChatRequest>,
+    ) -> Result<Response<LlmChatResponse>, Status> {
+        Ok(Response::new(self.answer_llm(request.into_inner()).await?))
+    }
+
+    type StreamChatStream = Pin<Box<dyn Stream<Item = Result<LlmChatChunk, Status>> + Send>>;
+
+    /// The whole answer as one final chunk: the @llm function returns once,
+    /// so there is nothing to send before it has. It carries no per-token
+    /// signal, and says so.
+    async fn stream_chat(
+        &self,
+        request: Request<LlmChatRequest>,
+    ) -> Result<Response<Self::StreamChatStream>, Status> {
+        let answer = self.answer_llm(request.into_inner()).await?;
+        let chunk = LlmChatChunk {
+            token: answer.content,
+            done: true,
+            model: answer.model,
+            prompt_tokens: answer.prompt_tokens,
+            completion_tokens: answer.completion_tokens,
+            total_tokens: answer.total_tokens,
+            signal_of: Some(llm_chat_chunk::SignalOf::NoSignal(true)),
+            served: answer.served,
+        };
+        Ok(Response::new(Box::pin(tokio_stream::once(Ok(chunk)))))
     }
 }
 
@@ -1117,6 +1456,501 @@ mod tests {
 
         let response: VersionResponse = serde_json::from_slice(&result.body).unwrap();
         assert_eq!(response.plugin_version, version());
+    }
+
+    /// Initialize as the node sends it to a plugin with no services wired:
+    /// no ATS, so no handlers are discovered. site_dir is a scratch
+    /// directory, because the default under /var/lib is not writable here.
+    fn bare_initialize(site_dir: &std::path::Path) -> InitializeRequest {
+        let mut config = HashMap::new();
+        config.insert("site_dir".to_string(), site_dir.display().to_string());
+        InitializeRequest {
+            config,
+            ..Default::default()
+        }
+    }
+
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pyre-test-{}-{}", name, std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // What capy and icpy get today: a plugin whose Python declares no LLM
+    // handler is no LLM provider, and the node never routes LLM calls to it.
+    #[tokio::test]
+    async fn a_plugin_that_declares_no_llm_handler_is_no_llm_provider() {
+        let service = PythonPluginService::new("python").unwrap();
+        let dir = scratch_dir("no-llm");
+        let response = service
+            .initialize(Request::new(bare_initialize(&dir)))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!response.llm_provider);
+        assert!(response.python_provider);
+    }
+
+    // And a path it does not know is still a 404.
+    #[tokio::test]
+    async fn a_path_no_route_declares_is_a_404() {
+        let service = PythonPluginService::new("python").unwrap();
+        let dir = scratch_dir("no-route");
+        service
+            .initialize(Request::new(bare_initialize(&dir)))
+            .await
+            .unwrap();
+        let response = service
+            .handle_http(Request::new(HttpRequest {
+                method: "POST".to_string(),
+                path: "/v1/chat/completions".to_string(),
+                body: b"{}".to_vec(),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.status_code, 404);
+    }
+
+    /// A service whose discovered handlers are these, as Initialize leaves it
+    /// after reading ATS.
+    async fn serving(handlers: &[(&str, &str)]) -> PythonPluginService {
+        let service = PythonPluginService::new("otaripy").unwrap();
+        let dir = scratch_dir(handlers.first().map(|h| h.0).unwrap_or("none"));
+        service
+            .initialize(Request::new(bare_initialize(&dir)))
+            .await
+            .unwrap();
+        let discovered: HashMap<String, String> = handlers
+            .iter()
+            .map(|(n, c)| (n.to_string(), c.to_string()))
+            .collect();
+        service.handlers.state.write().discovered_handlers = discovered.clone();
+        assert!(service.declare(&discovered).is_empty());
+        service
+    }
+
+    const ANSWERS: &str = concat!(
+        "@llm()\n",
+        "def chat(request):\n",
+        "    asked = request['messages'][-1]['content']\n",
+        "    return {\n",
+        "        'content': 'heard ' + asked,\n",
+        "        'model': 'good-model',\n",
+        "        'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5,\n",
+        "        'served': {\n",
+        "            'requested_provider': request['provider'],\n",
+        "            'requested_model': request['model'],\n",
+        "            'upstream_provider': 'secondary', 'executed_model': 'good-model',\n",
+        "            'request_id': 'req-1', 'cost_usd': '0.000023', 'attempt_count': 2,\n",
+        "            'fallback': True,\n",
+        "        },\n",
+        "    }\n",
+    );
+
+    fn asked() -> LlmChatRequest {
+        LlmChatRequest {
+            model: "fast".to_string(),
+            provider: "otaripy".to_string(),
+            messages: vec![crate::proto::ChatMessage {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    // The node's Chat reaches the @llm function, and what it says of how the
+    // call was served reaches the node as LLMServed.
+    #[tokio::test]
+    async fn chat_is_answered_by_the_llm_function() {
+        let service = serving(&[("gateway", ANSWERS)]).await;
+        let answer = service.chat(Request::new(asked())).await.unwrap().into_inner();
+
+        assert_eq!(answer.content, "heard hi");
+        assert_eq!(answer.model, "good-model");
+        assert_eq!(answer.total_tokens, 5);
+        let served = answer.served.unwrap();
+        assert_eq!(served.requested_provider, "otaripy");
+        assert_eq!(served.requested_model, "fast");
+        assert_eq!(served.upstream_provider, "secondary");
+        assert_eq!(served.request_id, "req-1");
+        assert_eq!(served.cost_usd.as_deref(), Some("0.000023"));
+        assert_eq!(served.attempt_count, 2);
+        assert!(served.fallback);
+        assert_eq!(served.pricing_source, "");
+    }
+
+    // StreamChat is the same answer in one final chunk, which says it
+    // carries no per-token signal, since the node refuses a chunk naming neither.
+    #[tokio::test]
+    async fn stream_chat_is_the_answer_in_one_final_chunk() {
+        use tokio_stream::StreamExt;
+        let service = serving(&[("gateway", ANSWERS)]).await;
+        let mut stream = service
+            .stream_chat(Request::new(asked()))
+            .await
+            .unwrap()
+            .into_inner();
+
+        let chunk = stream.next().await.unwrap().unwrap();
+        assert!(stream.next().await.is_none());
+        assert!(chunk.done);
+        assert_eq!(chunk.token, "heard hi");
+        assert_eq!(chunk.signal_of, Some(llm_chat_chunk::SignalOf::NoSignal(true)));
+        assert_eq!(chunk.served.unwrap().request_id, "req-1");
+    }
+
+    #[tokio::test]
+    async fn chat_without_an_llm_function_is_unimplemented() {
+        let service = serving(&[]).await;
+        let refused = service.chat(Request::new(asked())).await.unwrap_err();
+
+        assert_eq!(refused.code(), tonic::Code::Unimplemented);
+    }
+
+    // A refusal the function returns keeps its gRPC code and its words, as
+    // the Go plugin's mapping of otari's statuses does.
+    #[tokio::test]
+    async fn a_refusal_the_llm_function_returns_keeps_its_code() {
+        let refuses = "@llm()\ndef chat(request):\n    return {'error': {'code': 'PERMISSION_DENIED', 'message': '403 budget_exceeded'}}\n";
+        let service = serving(&[("gateway", refuses)]).await;
+        let refused = service.chat(Request::new(asked())).await.unwrap_err();
+
+        assert_eq!(refused.code(), tonic::Code::PermissionDenied);
+        assert_eq!(refused.message(), "403 budget_exceeded");
+    }
+
+    /// An ATS store holding these handlers, as the node's answers
+    /// GetAttestations for predicate=handler, and counting the attestations
+    /// it is asked to write. Writes are refused after they are counted.
+    struct HeldHandlers(Vec<(String, String)>, Arc<std::sync::atomic::AtomicUsize>);
+
+    #[tonic::async_trait]
+    impl crate::proto::ats_store_service_server::AtsStoreService for HeldHandlers {
+        async fn create_attestation(
+            &self,
+            _: Request<crate::proto::CreateAttestationRequest>,
+        ) -> Result<Response<crate::proto::CreateAttestationResponse>, Status> {
+            Err(Status::unimplemented("not held"))
+        }
+        async fn attestation_exists(
+            &self,
+            _: Request<crate::proto::AttestationExistsRequest>,
+        ) -> Result<Response<crate::proto::AttestationExistsResponse>, Status> {
+            Err(Status::unimplemented("not held"))
+        }
+        async fn generate_and_create_attestation(
+            &self,
+            _: Request<crate::proto::GenerateAttestationRequest>,
+        ) -> Result<Response<crate::proto::GenerateAttestationResponse>, Status> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(Status::unimplemented("not held"))
+        }
+        async fn batch_generate_and_create_attestations(
+            &self,
+            _: Request<crate::proto::BatchGenerateAttestationRequest>,
+        ) -> Result<Response<crate::proto::BatchGenerateAttestationResponse>, Status> {
+            Err(Status::unimplemented("not held"))
+        }
+        async fn get_attestations(
+            &self,
+            _: Request<crate::proto::GetAttestationsRequest>,
+        ) -> Result<Response<crate::proto::GetAttestationsResponse>, Status> {
+            let attestations = self
+                .0
+                .iter()
+                .map(|(name, code)| {
+                    let mut attrs = HashMap::new();
+                    attrs.insert("code".to_string(), serde_json::Value::String(code.clone()));
+                    crate::proto::Attestation {
+                        subjects: vec![name.clone()],
+                        predicates: vec!["handler".to_string()],
+                        attributes: Some(qntx_proto::serde_struct::json_map_to_struct(&attrs)),
+                        ..Default::default()
+                    }
+                })
+                .collect();
+            Ok(Response::new(crate::proto::GetAttestationsResponse {
+                success: true,
+                error: String::new(),
+                attestations,
+            }))
+        }
+        type GetAttestationsStreamStream =
+            Pin<Box<dyn Stream<Item = Result<crate::proto::Attestation, Status>> + Send>>;
+        async fn get_attestations_stream(
+            &self,
+            _: Request<crate::proto::GetAttestationsRequest>,
+        ) -> Result<Response<Self::GetAttestationsStreamStream>, Status> {
+            Err(Status::unimplemented("not held"))
+        }
+    }
+
+    /// Where an ATS store holding these handlers answers.
+    async fn ats_holding(handlers: &[(&str, &str)]) -> String {
+        ats_counting(handlers).await.0
+    }
+
+    /// Where an ATS store holding these handlers answers, and how many
+    /// attestations it has been asked to write.
+    async fn ats_counting(
+        handlers: &[(&str, &str)],
+    ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let written = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let held = HeldHandlers(
+            handlers
+                .iter()
+                .map(|(n, c)| (n.to_string(), c.to_string()))
+                .collect(),
+            written.clone(),
+        );
+        tokio::spawn(
+            tonic::transport::Server::builder()
+                .add_service(crate::proto::ats_store_service_server::AtsStoreServiceServer::new(held))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener)),
+        );
+        (address.to_string(), written)
+    }
+
+    // Initialize, with the handlers read from ATS as the node holds them,
+    // tells the node it is an LLM provider when one of them declares @llm.
+    #[tokio::test]
+    async fn a_plugin_that_declares_an_llm_function_is_an_llm_provider() {
+        let service = PythonPluginService::new("otaripy").unwrap();
+        let dir = scratch_dir("llm");
+        let mut request = bare_initialize(&dir);
+        request.ats_store_endpoint = ats_holding(&[("gateway", ANSWERS)]).await;
+
+        let response = service
+            .initialize(Request::new(request))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(response.llm_provider);
+        assert!(response.handler_names.contains(&"otaripy.gateway".to_string()));
+        let answer = service.chat(Request::new(asked())).await.unwrap().into_inner();
+        assert_eq!(answer.content, "heard hi");
+    }
+
+    const ROUTES: &str = concat!(
+        "@route('POST', '/v1/chat/completions')\n",
+        "def completions(request):\n",
+        "    return {\n",
+        "        'status': 201,\n",
+        "        'headers': {'Content-Type': 'text/plain', 'Otari-Request-ID': 'req-2'},\n",
+        "        'body': '|'.join([request['method'], request['path'], request['query'],\n",
+        "                          request['headers'].get('x-qntx-asker-did', ''),\n",
+        "                          request['body'].decode()]),\n",
+        "    }\n",
+    );
+
+    fn post(path: &str, body: &[u8]) -> HttpRequest {
+        HttpRequest {
+            method: "POST".to_string(),
+            path: path.to_string(),
+            headers: vec![HttpHeader {
+                name: "X-Qntx-Asker-Did".to_string(),
+                values: vec!["did:key:z6Mke2eCaller".to_string()],
+            }],
+            body: body.to_vec(),
+        }
+    }
+
+    // A path a handler declares reaches it whole: method, path, query, the
+    // headers the node set (who it admitted among them) and the body as sent,
+    // here one that is not JSON. Its status, headers and body come back.
+    #[tokio::test]
+    async fn a_declared_route_is_answered_by_its_function() {
+        let service = serving(&[("gateway", ROUTES)]).await;
+        let response = service
+            .handle_http(Request::new(post("/v1/chat/completions?x=1", b"not json")))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.status_code, 201);
+        assert_eq!(
+            String::from_utf8(response.body).unwrap(),
+            "POST|/v1/chat/completions|x=1|did:key:z6Mke2eCaller|not json"
+        );
+        let header = |name: &str| {
+            response
+                .headers
+                .iter()
+                .find(|h| h.name == name)
+                .map(|h| h.values.clone())
+        };
+        assert_eq!(header("Otari-Request-ID"), Some(vec!["req-2".to_string()]));
+        assert_eq!(header("Content-Type"), Some(vec!["text/plain".to_string()]));
+    }
+
+    // A route is its method and its path: the same path asked another way is
+    // no route, and pyre's own paths stay pyre's.
+    #[tokio::test]
+    async fn a_route_is_its_method_and_its_path() {
+        let service = serving(&[("gateway", ROUTES)]).await;
+        let mut get = post("/v1/chat/completions", b"");
+        get.method = "GET".to_string();
+        let response = service.handle_http(Request::new(get)).await.unwrap().into_inner();
+        assert_eq!(response.status_code, 404);
+
+        let version = HttpRequest {
+            method: "GET".to_string(),
+            path: "/version".to_string(),
+            ..Default::default()
+        };
+        let response = service.handle_http(Request::new(version)).await.unwrap().into_inner();
+        assert_eq!(response.status_code, 200);
+    }
+
+    #[tokio::test]
+    async fn a_route_function_that_raises_is_a_500_that_says_why() {
+        let raises = "@route('POST', '/boom')\ndef boom(request):\n    raise RuntimeError('upstream gone')\n";
+        let service = serving(&[("gateway", raises)]).await;
+        let response = service
+            .handle_http(Request::new(post("/boom", b"{}")))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert_eq!(response.status_code, 500);
+        assert!(String::from_utf8(response.body).unwrap().contains("upstream gone"));
+    }
+
+    // The record's config reaches the plugin's Python as the node handed it:
+    // a value the record names as ssm:/// or env: arrives resolved, so a
+    // handler needs no code and no credentials of its own for a secret.
+    #[tokio::test]
+    async fn a_handler_reads_its_plugins_config() {
+        let reads = "@llm()\ndef chat(request):\n    return {'content': plugin_config['upstream_key_name']}\n";
+        let service = PythonPluginService::new("otaripy").unwrap();
+        let dir = scratch_dir("config");
+        let mut request = bare_initialize(&dir);
+        request
+            .config
+            .insert("upstream_key_name".to_string(), "as the node resolved it".to_string());
+        request.ats_store_endpoint = ats_holding(&[("gateway", reads)]).await;
+        service.initialize(Request::new(request)).await.unwrap();
+
+        let answer = service.chat(Request::new(asked())).await.unwrap().into_inner();
+        assert_eq!(answer.content, "as the node resolved it");
+    }
+
+    fn handlers_of(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(n, c)| (n.to_string(), c.to_string())).collect()
+    }
+
+    // A second @llm function is not served, and its handler is not faulted:
+    // a fault is attested and takes the whole handler, its watchers and
+    // schedules with it, off every later load.
+    // A stopped plugin keeps none of the config the node resolved for it:
+    // its secrets among them, for anything still reaching /execute.
+    #[tokio::test]
+    async fn a_stopped_plugin_keeps_no_config() {
+        let service = PythonPluginService::new("otaripy").unwrap();
+        let dir = scratch_dir("stopped-config");
+        let mut request = bare_initialize(&dir);
+        request.config.insert("openrouter_api_key".to_string(), "resolved".to_string());
+        service.initialize(Request::new(request)).await.unwrap();
+        service.shutdown(Request::new(Empty {})).await.unwrap();
+
+        let read = service
+            .handlers
+            .handle_execute(serde_json::json!({"content": "print(len(plugin_config))"}))
+            .await
+            .unwrap();
+        let said: serde_json::Value = serde_json::from_slice(&read.body).unwrap();
+        assert_eq!(said["stdout"], "0\n", "{said}");
+    }
+
+    #[tokio::test]
+    async fn a_second_llm_function_is_not_served_and_not_faulted() {
+        let service = PythonPluginService::new("otaripy").unwrap();
+        let faulted = service.declare(&handlers_of(&[("a", ANSWERS), ("b", ANSWERS)]));
+
+        assert!(faulted.is_empty(), "{faulted:?}");
+        assert_eq!(
+            service.handlers.state.read().llm_handler,
+            Some(("a".to_string(), "chat".to_string()))
+        );
+    }
+
+    // The handler serving the node's LLM calls keeps serving them when a
+    // handler whose name sorts before it arrives declaring @llm too.
+    #[tokio::test]
+    async fn the_serving_llm_function_keeps_serving_when_another_arrives() {
+        let service = PythonPluginService::new("otaripy").unwrap();
+        service.declare(&handlers_of(&[("gateway", ANSWERS)]));
+        service.declare(&handlers_of(&[("aa", ANSWERS), ("gateway", ANSWERS)]));
+
+        assert_eq!(
+            service.handlers.state.read().llm_handler,
+            Some(("gateway".to_string(), "chat".to_string()))
+        );
+    }
+
+    // pyre's own paths stay pyre's: a route declaring one is not kept.
+    #[tokio::test]
+    async fn a_route_on_one_of_pyres_own_paths_is_not_kept() {
+        let takes = "@route('GET', '/version')\ndef v(request):\n    return {'status': 418}\n";
+        let service = serving(&[("gateway", takes)]).await;
+        assert!(service.handlers.state.read().routes.is_empty());
+
+        let version = HttpRequest {
+            method: "GET".to_string(),
+            path: "/version".to_string(),
+            ..Default::default()
+        };
+        let response = service.handle_http(Request::new(version)).await.unwrap().into_inner();
+        assert_eq!(response.status_code, 200);
+    }
+
+    // One method and path is one route: a second declaration of it is not
+    // kept, so which function answers is the first, said in the log.
+    #[tokio::test]
+    async fn a_route_declared_twice_is_kept_once() {
+        let service = serving(&[("a", ROUTES), ("b", ROUTES)]).await;
+        let routes = service.handlers.state.read().routes.clone();
+
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].1, "a");
+    }
+
+    // A plugin that has been told to stop serves no declared route and no
+    // LLM call.
+    #[tokio::test]
+    async fn a_stopped_plugin_serves_nothing_it_declared() {
+        let service = serving(&[("gateway", ROUTES), ("llm", ANSWERS)]).await;
+        service.shutdown(Request::new(Empty {})).await.unwrap();
+
+        let response = service
+            .handle_http(Request::new(post("/v1/chat/completions", b"{}")))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(response.status_code, 404);
+        let refused = service.chat(Request::new(asked())).await.unwrap_err();
+        assert_eq!(refused.code(), tonic::Code::Unimplemented);
+    }
+
+    // A handler that does not load is faulted once, not once per reading.
+    // Multi-threaded: the fault is written from inside Initialize by a client
+    // that blocks for its answer, and the stand-in ATS answers on this runtime.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_broken_handler_is_faulted_once() {
+        let service = PythonPluginService::new("otaripy").unwrap();
+        let dir = scratch_dir("broken");
+        let mut request = bare_initialize(&dir);
+        let (endpoint, written) = ats_counting(&[("broken", "raise SystemError('no')\n")]).await;
+        request.ats_store_endpoint = endpoint;
+        service.initialize(Request::new(request)).await.unwrap();
+
+        assert_eq!(written.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

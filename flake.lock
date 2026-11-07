@@ -37,16 +37,17 @@
     "qntx-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1779719092,
-        "narHash": "sha256-jL/ToiqRg6mOMxFZUa2Q/56YHnYIIluHghOgvcKBjW0=",
+        "lastModified": 1793834668,
+        "narHash": "sha256-xFz5NDwDLEr7t2eG1K2PFvJP17ke00NZ2VlLwh4YKgE=",
         "owner": "teranos",
         "repo": "QNTX",
-        "rev": "3841197e15b0f139fedfe5cfe5d2c28c9b1fbff0",
+        "rev": "035c62ed46375dde51243efe509006e610a8a76e",
         "type": "github"
       },
       "original": {
         "owner": "teranos",
         "repo": "QNTX",
+        "rev": "035c62ed46375dde51243efe509006e610a8a76e",
         "type": "github"
       }
     },

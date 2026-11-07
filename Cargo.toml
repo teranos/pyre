@@ -1,6 +1,6 @@
 [package]
 name = "pyre"
-version = "0.19.0"
+version = "0.26.0"
 edition = "2021"
 description = "Python runtime engine for QNTX"
 license = "MIT"
@@ -13,8 +13,8 @@ path = "src/main.rs"
 
 [dependencies]
 # QNTX gRPC infrastructure
-qntx-grpc = { git = "https://github.com/teranos/QNTX", features = ["plugin"] }
-qntx-proto = { git = "https://github.com/teranos/QNTX" }
+qntx-grpc = { git = "https://github.com/teranos/QNTX", rev = "035c62ed46375dde51243efe509006e610a8a76e", features = ["plugin"] }
+qntx-proto = { git = "https://github.com/teranos/QNTX", rev = "035c62ed46375dde51243efe509006e610a8a76e" }
 
 # gRPC and async
 tonic = "0.12"
@@ -30,6 +30,8 @@ pyo3 = { version = "0.24", features = ["auto-initialize"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# A declared route's bodies cross into Python as base64, so they arrive as sent.
+base64 = "0.22"
 
 # Logging
 tracing = "0.1"

@@ -7,6 +7,7 @@
 //!     pyre --address localhost:9000
 
 use pyre::proto::domain_plugin_service_server::DomainPluginServiceServer;
+use pyre::proto::llm_service_server::LlmServiceServer;
 use pyre::proto::python_service_server::PythonServiceServer;
 use pyre::PythonPluginService;
 use std::net::SocketAddr;
@@ -165,6 +166,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let incoming = TcpListenerStream::new(listener);
     Server::builder()
         .add_service(DomainPluginServiceServer::from_arc(service.clone()))
+        .add_service(LlmServiceServer::from_arc(service.clone()))
         .add_service(PythonServiceServer::from_arc(service))
         .serve_with_incoming_shutdown(incoming, shutdown_signal())
         .await?;

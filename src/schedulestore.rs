@@ -120,6 +120,7 @@ impl ScheduleClient {
                         interval_seconds,
                         payload: vec![],
                         metadata,
+                        made: Some(qntx_proto::create_schedule_request::Made::ByPlugin(true)),
                     })
                     .await
                     .map_err(|e| format!("gRPC error: {}", e))?

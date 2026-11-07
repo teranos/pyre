@@ -1701,8 +1701,9 @@ dependencies = [
 
 [[package]]
 name = "pyre"
-version = "0.19.0"
+version = "0.26.0"
 dependencies = [
+ "base64 0.22.1",
  "clap",
  "parking_lot",
  "prost",
@@ -1721,9 +1722,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "qntx-core"
+name = "qntx-ats"
 version = "0.2.44"
-source = "git+https://github.com/teranos/QNTX#3841197e15b0f139fedfe5cfe5d2c28c9b1fbff0"
+source = "git+https://github.com/teranos/QNTX?rev=035c62ed46375dde51243efe509006e610a8a76e#035c62ed46375dde51243efe509006e610a8a76e"
 dependencies = [
  "serde",
  "serde_json",
@@ -1734,10 +1735,9 @@ dependencies = [
 [[package]]
 name = "qntx-grpc"
 version = "0.2.44"
-source = "git+https://github.com/teranos/QNTX#3841197e15b0f139fedfe5cfe5d2c28c9b1fbff0"
+source = "git+https://github.com/teranos/QNTX?rev=035c62ed46375dde51243efe509006e610a8a76e#035c62ed46375dde51243efe509006e610a8a76e"
 dependencies = [
  "http",
- "lazy_static",
  "prost",
  "prost-types",
  "qntx-proto",
@@ -1755,14 +1755,14 @@ dependencies = [
 [[package]]
 name = "qntx-proto"
 version = "0.2.44"
-source = "git+https://github.com/teranos/QNTX#3841197e15b0f139fedfe5cfe5d2c28c9b1fbff0"
+source = "git+https://github.com/teranos/QNTX?rev=035c62ed46375dde51243efe509006e610a8a76e#035c62ed46375dde51243efe509006e610a8a76e"
 dependencies = [
  "base64 0.22.1",
  "prost",
  "prost-build",
  "prost-types",
  "protoc-bin-vendored",
- "qntx-core",
+ "qntx-ats",
  "serde",
  "serde_json",
 ]
@@ -2500,7 +2500,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.2",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
