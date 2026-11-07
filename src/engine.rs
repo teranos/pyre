@@ -41,8 +41,8 @@ pub struct RouteInfo {
 pub struct Declarations {
     /// Function name of the @llm handler, when the script has one
     pub llm: Option<String>,
-    /// Function name of the @rooms handler, when the script has one: the rooms
-    /// it holds, answered for the node's RoomsService (ADR-057)
+    /// 「[Opus 5.5] Function name of the @rooms handler, when the script has one: the rooms」
+    /// 「[Opus 5.5] it holds, answered for the node's RoomsService (ADR-057)」
     pub rooms: Option<String>,
     /// Routes the script serves
     pub routes: Vec<RouteInfo>,
