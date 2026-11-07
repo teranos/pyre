@@ -36,6 +36,9 @@ pub(crate) struct PluginState {
     /// The @llm function the node's LLM calls go to: (handler, function).
     /// None when no discovered handler declares one.
     pub llm_handler: Option<(String, String)>,
+    /// The @rooms function the node's room calls go to: (handler, function).
+    /// None when no discovered handler declares one.
+    pub rooms_handler: Option<(String, String)>,
     /// The @route functions: each route, with the handler that declares it.
     pub routes: Vec<(crate::engine::RouteInfo, String)>,
     /// Holds the Sentry client open. None until a DSN arrives in config.
