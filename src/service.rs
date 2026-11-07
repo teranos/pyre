@@ -839,12 +839,21 @@ impl PythonPluginService {
             }
         }
 
-        // One @rooms function holds the plugin's rooms: the first by name. Another
-        // is not served, as a second @llm is not.
-        let rooms_handler = read
-            .iter()
-            .find(|(_, d)| d.rooms.is_some())
-            .map(|(n, d)| (n.clone(), d.rooms.clone().unwrap_or_default()));
+        // One @rooms function holds the plugin's rooms: the one holding them now
+        // while its handler still declares it, else the first by name, as @llm.
+        let rooms_incumbent = self.handlers.state.read().rooms_handler.clone();
+        let declares_rooms = |handler: &str| {
+            read.iter()
+                .find(|(n, d)| n == handler && d.rooms.is_some())
+                .map(|(n, d)| (n.clone(), d.rooms.clone().unwrap_or_default()))
+        };
+        let rooms_handler = rooms_incumbent
+            .and_then(|(handler, _)| declares_rooms(&handler))
+            .or_else(|| {
+                read.iter()
+                    .find(|(_, d)| d.rooms.is_some())
+                    .map(|(n, d)| (n.clone(), d.rooms.clone().unwrap_or_default()))
+            });
         if let Some((handler, function)) = &rooms_handler {
             info!("Rooms: {}.{} holds the plugin's rooms", handler, function);
         }
