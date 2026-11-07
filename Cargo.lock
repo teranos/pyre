@@ -1701,7 +1701,7 @@ dependencies = [
 
 [[package]]
 name = "pyre"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -1724,7 +1724,7 @@ dependencies = [
 [[package]]
 name = "qntx-ats"
 version = "0.2.44"
-source = "git+https://github.com/teranos/QNTX?rev=035c62ed46375dde51243efe509006e610a8a76e#035c62ed46375dde51243efe509006e610a8a76e"
+source = "git+https://github.com/teranos/QNTX?rev=8793497a197fc945676a11f2acc3f14d305136f7#8793497a197fc945676a11f2acc3f14d305136f7"
 dependencies = [
  "serde",
  "serde_json",
@@ -1735,7 +1735,7 @@ dependencies = [
 [[package]]
 name = "qntx-grpc"
 version = "0.2.44"
-source = "git+https://github.com/teranos/QNTX?rev=035c62ed46375dde51243efe509006e610a8a76e#035c62ed46375dde51243efe509006e610a8a76e"
+source = "git+https://github.com/teranos/QNTX?rev=8793497a197fc945676a11f2acc3f14d305136f7#8793497a197fc945676a11f2acc3f14d305136f7"
 dependencies = [
  "http",
  "prost",
@@ -1755,7 +1755,7 @@ dependencies = [
 [[package]]
 name = "qntx-proto"
 version = "0.2.44"
-source = "git+https://github.com/teranos/QNTX?rev=035c62ed46375dde51243efe509006e610a8a76e#035c62ed46375dde51243efe509006e610a8a76e"
+source = "git+https://github.com/teranos/QNTX?rev=8793497a197fc945676a11f2acc3f14d305136f7#8793497a197fc945676a11f2acc3f14d305136f7"
 dependencies = [
  "base64 0.22.1",
  "prost",

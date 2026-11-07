@@ -32,6 +32,10 @@ class llm:
     def __init__(self, description=None): pass
     def __call__(self, fn): return fn
 
+class rooms:
+    def __init__(self, description=None): pass
+    def __call__(self, fn): return fn
+
 class route:
     def __init__(self, method, path): pass
     def __call__(self, fn): return fn
@@ -449,6 +453,9 @@ class schedule:
             "class llm:\n",
             "    def __init__(self, description=None): pass\n",
             "    def __call__(self, fn): return fn\n",
+            "class rooms:\n",
+            "    def __init__(self, description=None): pass\n",
+            "    def __call__(self, fn): return fn\n",
             "class route:\n",
             "    def __init__(self, method, path): pass\n",
             "    def __call__(self, fn): return fn\n",
@@ -487,7 +494,7 @@ class schedule:
         }
         // A module that only declares what it serves is read for that
         // elsewhere; run as a script, its decorators still have to resolve.
-        if code.contains("@llm") || code.contains("@route") {
+        if code.contains("@llm") || code.contains("@rooms") || code.contains("@route") {
             return Ok(format!("{STUBS}\n{code}\n{MAIN}"));
         }
         Ok(format!("{code}\n{MAIN}"))
@@ -622,6 +629,7 @@ class watch:
     pub fn extract_declarations(&self, code: &str) -> Result<Declarations, String> {
         let preamble = r#"
 _qntx_llm = []
+_qntx_rooms = []
 _qntx_routes = []
 
 class handler:
@@ -642,6 +650,12 @@ class llm:
         _qntx_llm.append(fn.__name__)
         return fn
 
+class rooms:
+    def __init__(self, description=None): pass
+    def __call__(self, fn):
+        _qntx_rooms.append(fn.__name__)
+        return fn
+
 class route:
     def __init__(self, method, path):
         self._method = method
@@ -656,7 +670,7 @@ class route:
 "#;
 
         let extract_code = format!(
-            "{}\n{}\nimport json\n_result = json.dumps({{'llm': _qntx_llm, 'routes': _qntx_routes}})",
+            "{}\n{}\nimport json\n_result = json.dumps({{'llm': _qntx_llm, 'rooms': _qntx_rooms, 'routes': _qntx_routes}})",
             preamble, code
         );
         let result = self.execute(&extract_code, &ExecutionConfig::default());
@@ -687,6 +701,18 @@ class route:
             ));
         }
 
+        let rooms: Vec<String> = read["rooms"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        if rooms.len() > 1 {
+            return Err(format!(
+                "a script declares one @rooms function, and this one declares {}: {}",
+                rooms.len(),
+                rooms.join(", ")
+            ));
+        }
+
         let routes = read["routes"]
             .as_array()
             .map(|a| {
@@ -704,6 +730,7 @@ class route:
 
         Ok(Declarations {
             llm: llm.into_iter().next(),
+            rooms: rooms.into_iter().next(),
             routes,
         })
     }
@@ -1110,6 +1137,16 @@ mod tests {
         "def completions(request):\n",
         "    return {'status': 200, 'body': 'ok'}\n",
     );
+
+    // The rooms a plugin provides are read off its @rooms function.
+    #[test]
+    fn a_script_declares_its_rooms_function() {
+        let engine = PythonEngine::new().unwrap();
+        let script = "@rooms()\ndef held(asked):\n    return {'list': []}\n";
+        let declared = engine.extract_declarations(script).unwrap();
+        assert_eq!(declared.rooms.as_deref(), Some("held"));
+        assert_eq!(declared.llm, None);
+    }
 
     // What a script serves is read off it, as what triggers it is.
     #[test]

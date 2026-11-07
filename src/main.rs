@@ -9,6 +9,7 @@
 use pyre::proto::domain_plugin_service_server::DomainPluginServiceServer;
 use pyre::proto::llm_service_server::LlmServiceServer;
 use pyre::proto::python_service_server::PythonServiceServer;
+use pyre::proto::rooms_service_server::RoomsServiceServer;
 use pyre::PythonPluginService;
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
@@ -105,7 +106,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut last_err = None;
         let mut bound = None;
         for _ in 0..MAX_PORT_RETRIES {
-            let addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
+            // The node that runs a plugin reaches it on this box; nothing else does.
+            let addr: SocketAddr = format!("127.0.0.1:{}", port).parse()?;
             match TcpListener::bind(addr).await {
                 Ok(l) => {
                     bound = Some(l);
@@ -167,6 +169,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Server::builder()
         .add_service(DomainPluginServiceServer::from_arc(service.clone()))
         .add_service(LlmServiceServer::from_arc(service.clone()))
+        .add_service(RoomsServiceServer::from_arc(service.clone()))
         .add_service(PythonServiceServer::from_arc(service))
         .serve_with_incoming_shutdown(incoming, shutdown_signal())
         .await?;

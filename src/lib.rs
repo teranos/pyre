@@ -21,6 +21,7 @@ pub mod execution;
 pub mod fetchstore;
 mod handlers;
 pub mod proto;
+pub mod rooms;
 pub mod schedulestore;
 pub mod service;
 pub mod telemetry;

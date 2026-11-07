@@ -55,8 +55,8 @@ fn answering(endpoint: &Option<ServiceEndpoint>) -> Option<String> {
 
 /// Python plugin gRPC service
 pub struct PythonPluginService {
-    handlers: HandlerContext,
-    name: String,
+    pub(crate) handlers: HandlerContext,
+    pub(crate) name: String,
 }
 
 impl PythonPluginService {
@@ -82,6 +82,7 @@ impl PythonPluginService {
             fetch_client: crate::fetchstore::new_shared_client(),
             discovered_handlers: HashMap::new(),
             llm_handler: None,
+            rooms_handler: None,
             routes: vec![],
             telemetry: None,
         }));
@@ -518,12 +519,16 @@ impl DomainPluginService for PythonPluginService {
         // Said only by a plugin whose Python declares @llm, so the node
         // routes LLM calls to no pyre plugin that cannot answer them.
         let llm_provider = self.handlers.state.read().llm_handler.is_some();
+        // "rooms will be plugin provided": said only by a plugin whose Python
+        // declares @rooms.
+        let rooms_provider = self.handlers.state.read().rooms_handler.is_some();
 
         Ok(Response::new(InitializeResponse {
             handler_names,
             schedules,
             watchers,
             llm_provider,
+            rooms_provider,
             python_provider: true,
             ..Default::default()
         }))
@@ -538,6 +543,7 @@ impl DomainPluginService for PythonPluginService {
         // A stopped plugin serves nothing it declared; Initialize reads the
         // declarations again.
         state.llm_handler = None;
+        state.rooms_handler = None;
         state.routes.clear();
         // The config the node resolved, secrets among it, goes with them.
         state.engine.set_plugin_config(&HashMap::new());
@@ -833,6 +839,25 @@ impl PythonPluginService {
             }
         }
 
+        // One @rooms function holds the plugin's rooms: the one holding them now
+        // while its handler still declares it, else the first by name, as @llm.
+        let rooms_incumbent = self.handlers.state.read().rooms_handler.clone();
+        let declares_rooms = |handler: &str| {
+            read.iter()
+                .find(|(n, d)| n == handler && d.rooms.is_some())
+                .map(|(n, d)| (n.clone(), d.rooms.clone().unwrap_or_default()))
+        };
+        let rooms_handler = rooms_incumbent
+            .and_then(|(handler, _)| declares_rooms(&handler))
+            .or_else(|| {
+                read.iter()
+                    .find(|(_, d)| d.rooms.is_some())
+                    .map(|(n, d)| (n.clone(), d.rooms.clone().unwrap_or_default()))
+            });
+        if let Some((handler, function)) = &rooms_handler {
+            info!("Rooms: {}.{} holds the plugin's rooms", handler, function);
+        }
+
         // A route is one method and path, answered by one function, and pyre's
         // own paths are pyre's. A declaration of either is not kept.
         let mut routes: Vec<(crate::engine::RouteInfo, String)> = vec![];
@@ -857,13 +882,14 @@ impl PythonPluginService {
 
         let mut state = self.handlers.state.write();
         state.llm_handler = llm_handler;
+        state.rooms_handler = rooms_handler;
         state.routes = routes;
         faulted
     }
 
     /// Call a function a handler declares, off the async workers: a call
     /// holds the interpreter for as long as the function runs.
-    async fn call_declared(
+    pub(crate) async fn call_declared(
         &self,
         handler: String,
         function: String,
@@ -1337,7 +1363,7 @@ impl PythonPluginService {
 }
 
 /// The status a refusal the @llm function returned names, by its gRPC name.
-fn refused(error: &serde_json::Value) -> Status {
+pub(crate) fn refused(error: &serde_json::Value) -> Status {
     let message = error["message"].as_str().unwrap_or_default().to_string();
     match error["code"].as_str().unwrap_or_default() {
         "INVALID_ARGUMENT" => Status::invalid_argument(message),
