@@ -31,7 +31,7 @@ use tracing::{debug, error, info, warn};
 /// Default timeout for Python job execution (5 minutes)
 const DEFAULT_TIMEOUT_SECS: u64 = 300;
 
-/// The paths handle_http answers itself, by method.
+/// 「[Opus 5.5] The paths handle_http answers itself, by method.」
 const PYRE_PATHS: &[(&str, &str)] = &[
     ("POST", "/execute"),
     ("POST", "/evaluate"),
@@ -44,8 +44,8 @@ const PYRE_PATHS: &[(&str, &str)] = &[
     ("GET", "/modules"),
 ];
 
-/// Where a service the node runs answers, when it does. A service the node
-/// runs without says why instead, and that is no endpoint to dial.
+/// 「[Opus 5.5] Where a service the node runs answers, when it does. A service the node」
+/// 「[Opus 5.5] runs without says why instead, and that is no endpoint to dial.」
 fn answering(endpoint: &Option<ServiceEndpoint>) -> Option<String> {
     match endpoint.as_ref()?.state.as_ref()? {
         service_endpoint::State::Address(address) if !address.is_empty() => Some(address.clone()),
@@ -411,8 +411,8 @@ impl DomainPluginService for PythonPluginService {
         for handler_name in &sorted_handlers {
             handler_names.push(format!("{}.{}", self.name, handler_name));
 
-            // Faulted already, by reading what it serves: running the module
-            // again would fault it a second time for the same reason.
+            // 「[Opus 5.5] Faulted already, by reading what it serves: running the module」
+            // 「[Opus 5.5] again would fault it a second time for the same reason.」
             if faulted.iter().any(|(n, _)| n == *handler_name) {
                 continue;
             }
@@ -515,8 +515,8 @@ impl DomainPluginService for PythonPluginService {
             );
         }
 
-        // Said only by a plugin whose Python declares @llm, so the node
-        // routes LLM calls to no pyre plugin that cannot answer them.
+        // 「[Opus 5.5] Said only by a plugin whose Python declares @llm, so the node」
+        // 「[Opus 5.5] routes LLM calls to no pyre plugin that cannot answer them.」
         let llm_provider = self.handlers.state.read().llm_handler.is_some();
 
         Ok(Response::new(InitializeResponse {
@@ -535,11 +535,11 @@ impl DomainPluginService for PythonPluginService {
         let mut state = self.handlers.state.write();
         state.initialized = false;
         state.config = None;
-        // A stopped plugin serves nothing it declared; Initialize reads the
-        // declarations again.
+        // 「[Opus 5.5] A stopped plugin serves nothing it declared; Initialize reads the」
+        // 「[Opus 5.5] declarations again.」
         state.llm_handler = None;
         state.routes.clear();
-        // The config the node resolved, secrets among it, goes with them.
+        // 「[Opus 5.5] The config the node resolved, secrets among it, goes with them.」
         state.engine.set_plugin_config(&HashMap::new());
         Ok(Response::new(ShutdownResponse { stopped: true }))
     }
@@ -556,9 +556,9 @@ impl DomainPluginService for PythonPluginService {
 
         debug!("HTTP request: {} {}", method, path);
 
-        // A route a handler declares is answered by it, body untouched:
-        // before the JSON parse below, which pyre's own paths need and a
-        // declared route's body need not pass.
+        // 「[Opus 5.5] A route a handler declares is answered by it, body untouched:」
+        // 「[Opus 5.5] before the JSON parse below, which pyre's own paths need and a」
+        // 「[Opus 5.5] declared route's body need not pass.」
         if let Some((handler, function)) = self.route_for(method, path) {
             let (path, query) = (path.to_string(), query.to_string());
             return Ok(Response::new(
@@ -671,7 +671,7 @@ impl DomainPluginService for PythonPluginService {
         }))
     }
 
-    /// Register custom element types (none for Python plugin)
+    /// 「[Opus 5.5] Register custom element types (none for Python plugin)」
     async fn register_elements(
         &self,
         _request: Request<Empty>,
@@ -737,7 +737,7 @@ impl PythonService for PythonPluginService {
             })?)
         };
 
-        // Set element ID for actor convention
+        // 「[Opus 5.5] Set element ID for actor convention」
         if !req.element_id.is_empty() {
             crate::atsstore::set_current_glyph_id(Some(req.element_id.clone()));
         }
@@ -781,9 +781,9 @@ impl PythonPluginService {
     /// Put each unreadable handler where something other than the journal can
     /// find it. A fault names the handler and why, in the plugin's own context,
     /// so `predicate=handler:faulted` answers what `crowbar` used to.
-    /// Read what each handler declares it serves, and keep it: the one @llm
-    /// function, and every @route. A handler whose declarations cannot be
-    /// read, or that declares a second @llm, is faulted and serves nothing.
+    /// 「[Opus 5.5] Read what each handler declares it serves, and keep it: the one @llm」
+    /// 「[Opus 5.5] function, and every @route. A handler whose declarations cannot be」
+    /// 「[Opus 5.5] read, or that declares a second @llm, is faulted and serves nothing.」
     fn declare(&self, handlers: &HashMap<String, String>) -> Vec<(String, String)> {
         let mut faulted = vec![];
         let mut names: Vec<_> = handlers.keys().collect();
@@ -803,10 +803,10 @@ impl PythonPluginService {
             }
         }
 
-        // One @llm function answers the node's LLM calls: the one answering
-        // them now while its handler still declares it, else the first by
-        // name. Another is not served, and its handler is not faulted for it:
-        // a fault takes the whole handler off every later load.
+        // 「[Opus 5.5] One @llm function answers the node's LLM calls: the one answering」
+        // 「[Opus 5.5] them now while its handler still declares it, else the first by」
+        // 「[Opus 5.5] name. Another is not served, and its handler is not faulted for it:」
+        // 「[Opus 5.5] a fault takes the whole handler off every later load.」
         let incumbent = self.handlers.state.read().llm_handler.clone();
         let declares_llm = |handler: &str| {
             read.iter()
@@ -833,8 +833,8 @@ impl PythonPluginService {
             }
         }
 
-        // A route is one method and path, answered by one function, and pyre's
-        // own paths are pyre's. A declaration of either is not kept.
+        // 「[Opus 5.5] A route is one method and path, answered by one function, and pyre's」
+        // 「[Opus 5.5] own paths are pyre's. A declaration of either is not kept.」
         let mut routes: Vec<(crate::engine::RouteInfo, String)> = vec![];
         for (name, d) in read {
             for route in d.routes {
@@ -861,8 +861,8 @@ impl PythonPluginService {
         faulted
     }
 
-    /// Call a function a handler declares, off the async workers: a call
-    /// holds the interpreter for as long as the function runs.
+    /// 「[Opus 5.5] Call a function a handler declares, off the async workers: a call」
+    /// 「[Opus 5.5] holds the interpreter for as long as the function runs.」
     async fn call_declared(
         &self,
         handler: String,
@@ -899,7 +899,7 @@ impl PythonPluginService {
             .map_err(|e| Status::internal(format!("the call did not finish: {e}")))?
     }
 
-    /// The node's LLM call, answered by the @llm function.
+    /// 「[Opus 5.5] The node's LLM call, answered by the @llm function.」
     async fn answer_llm(&self, request: LlmChatRequest) -> Result<LlmChatResponse, Status> {
         let declared = self.handlers.state.read().llm_handler.clone();
         let (handler, function) = declared.ok_or_else(|| {
@@ -911,7 +911,7 @@ impl PythonPluginService {
         llm_answer(&answer)
     }
 
-    /// The @route function that serves this method and path, when one does.
+    /// 「[Opus 5.5] The @route function that serves this method and path, when one does.」
     fn route_for(&self, method: &str, path: &str) -> Option<(String, String)> {
         self.handlers
             .state
@@ -922,8 +922,8 @@ impl PythonPluginService {
             .map(|(r, handler)| (handler.clone(), r.handler_fn.clone()))
     }
 
-    /// A request on a declared route, answered by its function. A function
-    /// that raises is a 500 whose body says why.
+    /// 「[Opus 5.5] A request on a declared route, answered by its function. A function」
+    /// 「[Opus 5.5] that raises is a 500 whose body says why.」
     async fn answer_route(
         &self,
         handler: String,
@@ -1336,7 +1336,7 @@ impl PythonPluginService {
     }
 }
 
-/// The status a refusal the @llm function returned names, by its gRPC name.
+/// 「[Opus 5.5] The status a refusal the @llm function returned names, by its gRPC name.」
 fn refused(error: &serde_json::Value) -> Status {
     let message = error["message"].as_str().unwrap_or_default().to_string();
     match error["code"].as_str().unwrap_or_default() {
@@ -1361,10 +1361,10 @@ fn count(v: &serde_json::Value, key: &str) -> i32 {
     v[key].as_i64().unwrap_or(0) as i32
 }
 
-/// What the @llm function returned, as the node's LLMChatResponse. It
-/// returns `content` and may return `model`, the token counts and `served`,
-/// each under its proto field name; or `error` with a gRPC `code` and a
-/// `message`, which the node receives as that status.
+/// 「[Opus 5.5] What the @llm function returned, as the node's LLMChatResponse. It」
+/// 「[Opus 5.5] returns `content` and may return `model`, the token counts and `served`,」
+/// 「[Opus 5.5] each under its proto field name; or `error` with a gRPC `code` and a」
+/// 「[Opus 5.5] `message`, which the node receives as that status.」
 #[allow(clippy::result_large_err)]
 fn llm_answer(answer: &serde_json::Value) -> Result<LlmChatResponse, Status> {
     if !answer["error"].is_null() {
@@ -1408,9 +1408,9 @@ impl LlmService for PythonPluginService {
 
     type StreamChatStream = Pin<Box<dyn Stream<Item = Result<LlmChatChunk, Status>> + Send>>;
 
-    /// The whole answer as one final chunk: the @llm function returns once,
-    /// so there is nothing to send before it has. It carries no per-token
-    /// signal, and says so.
+    /// 「[Opus 5.5] The whole answer as one final chunk: the @llm function returns once,」
+    /// 「[Opus 5.5] so there is nothing to send before it has. It carries no per-token」
+    /// 「[Opus 5.5] signal, and says so.」
     async fn stream_chat(
         &self,
         request: Request<LlmChatRequest>,
@@ -1458,9 +1458,9 @@ mod tests {
         assert_eq!(response.plugin_version, version());
     }
 
-    /// Initialize as the node sends it to a plugin with no services wired:
-    /// no ATS, so no handlers are discovered. site_dir is a scratch
-    /// directory, because the default under /var/lib is not writable here.
+    /// 「[Opus 5.5] Initialize as the node sends it to a plugin with no services wired:」
+    /// 「[Opus 5.5] no ATS, so no handlers are discovered. site_dir is a scratch」
+    /// 「[Opus 5.5] directory, because the default under /var/lib is not writable here.」
     fn bare_initialize(site_dir: &std::path::Path) -> InitializeRequest {
         let mut config = HashMap::new();
         config.insert("site_dir".to_string(), site_dir.display().to_string());
@@ -1476,8 +1476,8 @@ mod tests {
         dir
     }
 
-    // What capy and icpy get today: a plugin whose Python declares no LLM
-    // handler is no LLM provider, and the node never routes LLM calls to it.
+    // 「[Opus 5.5] What capy and icpy get today: a plugin whose Python declares no LLM」
+    // 「[Opus 5.5] handler is no LLM provider, and the node never routes LLM calls to it.」
     #[tokio::test]
     async fn a_plugin_that_declares_no_llm_handler_is_no_llm_provider() {
         let service = PythonPluginService::new("python").unwrap();
@@ -1491,7 +1491,7 @@ mod tests {
         assert!(response.python_provider);
     }
 
-    // And a path it does not know is still a 404.
+    // 「[Opus 5.5] And a path it does not know is still a 404.」
     #[tokio::test]
     async fn a_path_no_route_declares_is_a_404() {
         let service = PythonPluginService::new("python").unwrap();
@@ -1513,8 +1513,8 @@ mod tests {
         assert_eq!(response.status_code, 404);
     }
 
-    /// A service whose discovered handlers are these, as Initialize leaves it
-    /// after reading ATS.
+    /// 「[Opus 5.5] A service whose discovered handlers are these, as Initialize leaves it」
+    /// 「[Opus 5.5] after reading ATS.」
     async fn serving(handlers: &[(&str, &str)]) -> PythonPluginService {
         let service = PythonPluginService::new("otaripy").unwrap();
         let dir = scratch_dir(handlers.first().map(|h| h.0).unwrap_or("none"));
@@ -1561,8 +1561,8 @@ mod tests {
         }
     }
 
-    // The node's Chat reaches the @llm function, and what it says of how the
-    // call was served reaches the node as LLMServed.
+    // 「[Opus 5.5] The node's Chat reaches the @llm function, and what it says of how the」
+    // 「[Opus 5.5] call was served reaches the node as LLMServed.」
     #[tokio::test]
     async fn chat_is_answered_by_the_llm_function() {
         let service = serving(&[("gateway", ANSWERS)]).await;
@@ -1582,8 +1582,8 @@ mod tests {
         assert_eq!(served.pricing_source, "");
     }
 
-    // StreamChat is the same answer in one final chunk, which says it
-    // carries no per-token signal, since the node refuses a chunk naming neither.
+    // 「[Opus 5.5] StreamChat is the same answer in one final chunk, which says it」
+    // 「[Opus 5.5] carries no per-token signal, since the node refuses a chunk naming neither.」
     #[tokio::test]
     async fn stream_chat_is_the_answer_in_one_final_chunk() {
         use tokio_stream::StreamExt;
@@ -1610,8 +1610,8 @@ mod tests {
         assert_eq!(refused.code(), tonic::Code::Unimplemented);
     }
 
-    // A refusal the function returns keeps its gRPC code and its words, as
-    // the Go plugin's mapping of otari's statuses does.
+    // 「[Opus 5.5] A refusal the function returns keeps its gRPC code and its words, as」
+    // 「[Opus 5.5] the Go plugin's mapping of otari's statuses does.」
     #[tokio::test]
     async fn a_refusal_the_llm_function_returns_keeps_its_code() {
         let refuses = "@llm()\ndef chat(request):\n    return {'error': {'code': 'PERMISSION_DENIED', 'message': '403 budget_exceeded'}}\n";
@@ -1622,9 +1622,9 @@ mod tests {
         assert_eq!(refused.message(), "403 budget_exceeded");
     }
 
-    /// An ATS store holding these handlers, as the node's answers
-    /// GetAttestations for predicate=handler, and counting the attestations
-    /// it is asked to write. Writes are refused after they are counted.
+    /// 「[Opus 5.5] An ATS store holding these handlers, as the node's answers」
+    /// 「[Opus 5.5] GetAttestations for predicate=handler, and counting the attestations」
+    /// 「[Opus 5.5] it is asked to write. Writes are refused after they are counted.」
     struct HeldHandlers(Vec<(String, String)>, Arc<std::sync::atomic::AtomicUsize>);
 
     #[tonic::async_trait]
@@ -1688,13 +1688,13 @@ mod tests {
         }
     }
 
-    /// Where an ATS store holding these handlers answers.
+    /// 「[Opus 5.5] Where an ATS store holding these handlers answers.」
     async fn ats_holding(handlers: &[(&str, &str)]) -> String {
         ats_counting(handlers).await.0
     }
 
-    /// Where an ATS store holding these handlers answers, and how many
-    /// attestations it has been asked to write.
+    /// 「[Opus 5.5] Where an ATS store holding these handlers answers, and how many」
+    /// 「[Opus 5.5] attestations it has been asked to write.」
     async fn ats_counting(
         handlers: &[(&str, &str)],
     ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
@@ -1716,8 +1716,8 @@ mod tests {
         (address.to_string(), written)
     }
 
-    // Initialize, with the handlers read from ATS as the node holds them,
-    // tells the node it is an LLM provider when one of them declares @llm.
+    // 「[Opus 5.5] Initialize, with the handlers read from ATS as the node holds them,」
+    // 「[Opus 5.5] tells the node it is an LLM provider when one of them declares @llm.」
     #[tokio::test]
     async fn a_plugin_that_declares_an_llm_function_is_an_llm_provider() {
         let service = PythonPluginService::new("otaripy").unwrap();
@@ -1761,9 +1761,9 @@ mod tests {
         }
     }
 
-    // A path a handler declares reaches it whole: method, path, query, the
-    // headers the node set (who it admitted among them) and the body as sent,
-    // here one that is not JSON. Its status, headers and body come back.
+    // 「[Opus 5.5] A path a handler declares reaches it whole: method, path, query, the」
+    // 「[Opus 5.5] headers the node set (who it admitted among them) and the body as sent,」
+    // 「[Opus 5.5] here one that is not JSON. Its status, headers and body come back.」
     #[tokio::test]
     async fn a_declared_route_is_answered_by_its_function() {
         let service = serving(&[("gateway", ROUTES)]).await;
@@ -1789,8 +1789,8 @@ mod tests {
         assert_eq!(header("Content-Type"), Some(vec!["text/plain".to_string()]));
     }
 
-    // A route is its method and its path: the same path asked another way is
-    // no route, and pyre's own paths stay pyre's.
+    // 「[Opus 5.5] A route is its method and its path: the same path asked another way is」
+    // 「[Opus 5.5] no route, and pyre's own paths stay pyre's.」
     #[tokio::test]
     async fn a_route_is_its_method_and_its_path() {
         let service = serving(&[("gateway", ROUTES)]).await;
@@ -1822,9 +1822,9 @@ mod tests {
         assert!(String::from_utf8(response.body).unwrap().contains("upstream gone"));
     }
 
-    // The record's config reaches the plugin's Python as the node handed it:
-    // a value the record names as ssm:/// or env: arrives resolved, so a
-    // handler needs no code and no credentials of its own for a secret.
+    // 「[Opus 5.5] The record's config reaches the plugin's Python as the node handed it:」
+    // 「[Opus 5.5] a value the record names as ssm:/// or env: arrives resolved, so a」
+    // 「[Opus 5.5] handler needs no code and no credentials of its own for a secret.」
     #[tokio::test]
     async fn a_handler_reads_its_plugins_config() {
         let reads = "@llm()\ndef chat(request):\n    return {'content': plugin_config['upstream_key_name']}\n";
@@ -1845,11 +1845,11 @@ mod tests {
         pairs.iter().map(|(n, c)| (n.to_string(), c.to_string())).collect()
     }
 
-    // A second @llm function is not served, and its handler is not faulted:
-    // a fault is attested and takes the whole handler, its watchers and
-    // schedules with it, off every later load.
-    // A stopped plugin keeps none of the config the node resolved for it:
-    // its secrets among them, for anything still reaching /execute.
+    // 「[Opus 5.5] A second @llm function is not served, and its handler is not faulted:」
+    // 「[Opus 5.5] a fault is attested and takes the whole handler, its watchers and」
+    // 「[Opus 5.5] schedules with it, off every later load.」
+    // 「[Opus 5.5] A stopped plugin keeps none of the config the node resolved for it:」
+    // 「[Opus 5.5] its secrets among them, for anything still reaching /execute.」
     #[tokio::test]
     async fn a_stopped_plugin_keeps_no_config() {
         let service = PythonPluginService::new("otaripy").unwrap();
@@ -1880,8 +1880,8 @@ mod tests {
         );
     }
 
-    // The handler serving the node's LLM calls keeps serving them when a
-    // handler whose name sorts before it arrives declaring @llm too.
+    // 「[Opus 5.5] The handler serving the node's LLM calls keeps serving them when a」
+    // 「[Opus 5.5] handler whose name sorts before it arrives declaring @llm too.」
     #[tokio::test]
     async fn the_serving_llm_function_keeps_serving_when_another_arrives() {
         let service = PythonPluginService::new("otaripy").unwrap();
@@ -1894,7 +1894,7 @@ mod tests {
         );
     }
 
-    // pyre's own paths stay pyre's: a route declaring one is not kept.
+    // 「[Opus 5.5] pyre's own paths stay pyre's: a route declaring one is not kept.」
     #[tokio::test]
     async fn a_route_on_one_of_pyres_own_paths_is_not_kept() {
         let takes = "@route('GET', '/version')\ndef v(request):\n    return {'status': 418}\n";
@@ -1910,8 +1910,8 @@ mod tests {
         assert_eq!(response.status_code, 200);
     }
 
-    // One method and path is one route: a second declaration of it is not
-    // kept, so which function answers is the first, said in the log.
+    // 「[Opus 5.5] One method and path is one route: a second declaration of it is not」
+    // 「[Opus 5.5] kept, so which function answers is the first, said in the log.」
     #[tokio::test]
     async fn a_route_declared_twice_is_kept_once() {
         let service = serving(&[("a", ROUTES), ("b", ROUTES)]).await;
@@ -1921,8 +1921,8 @@ mod tests {
         assert_eq!(routes[0].1, "a");
     }
 
-    // A plugin that has been told to stop serves no declared route and no
-    // LLM call.
+    // 「[Opus 5.5] A plugin that has been told to stop serves no declared route and no」
+    // 「[Opus 5.5] LLM call.」
     #[tokio::test]
     async fn a_stopped_plugin_serves_nothing_it_declared() {
         let service = serving(&[("gateway", ROUTES), ("llm", ANSWERS)]).await;
@@ -1938,9 +1938,9 @@ mod tests {
         assert_eq!(refused.code(), tonic::Code::Unimplemented);
     }
 
-    // A handler that does not load is faulted once, not once per reading.
-    // Multi-threaded: the fault is written from inside Initialize by a client
-    // that blocks for its answer, and the stand-in ATS answers on this runtime.
+    // 「[Opus 5.5] A handler that does not load is faulted once, not once per reading.」
+    // 「[Opus 5.5] Multi-threaded: the fault is written from inside Initialize by a client」
+    // 「[Opus 5.5] that blocks for its answer, and the stand-in ATS answers on this runtime.」
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_broken_handler_is_faulted_once() {
         let service = PythonPluginService::new("otaripy").unwrap();
