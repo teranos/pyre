@@ -5,7 +5,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     qntx-src = {
-      url = "github:teranos/QNTX/8793497a197fc945676a11f2acc3f14d305136f7";
+      url = "github:teranos/QNTX/e82dfab1927de922060a182f7e5faf3b4b88614e";
       flake = false;
     };
   };
@@ -16,7 +16,7 @@
         pkgs = import nixpkgs { inherit system; };
 
         outputHashes = {
-          "qntx-ats-0.2.44" = "sha256-bHkfuwmivE29uXjYqABTSNlUNu5hl41cwgnCPLRczbM=";
+          "qntx-ats-0.2.44" = "sha256-PnPMxYNQmtcNN0hGqqh6qf4Fz4EpVez6BHS2Zhzh9G0=";
         };
 
         pyre = pkgs.rustPlatform.buildRustPackage {
