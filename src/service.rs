@@ -110,12 +110,16 @@ impl PythonPluginService {
         };
         use tonic::transport::Channel;
 
+        // A plugin's own handlers come with its build; a store's are laid over
+        // them, the newer word on the same name.
+        let mut found = bundled_handlers();
+
         // Check if we have config with ATS store endpoint
         let config = match config {
             Some(cfg) if !cfg.ats_store_endpoint.is_empty() => cfg,
             _ => {
-                info!("No ATS store endpoint configured, skipping handler discovery");
-                return HashMap::new();
+                info!("No ATS store endpoint configured: the build's own handlers only");
+                return found;
             }
         };
 
@@ -235,14 +239,52 @@ impl PythonPluginService {
                     handlers.len(),
                     handlers.keys().collect::<Vec<_>>()
                 );
-                handlers
+                found.extend(handlers);
+                found
             }
             Err(e) => {
                 warn!("Failed to discover handlers from ATS store: {}", e);
-                HashMap::new()
+                found
             }
         }
     }
+}
+
+/// The handlers a plugin's build carries: each handlers/<name>.py beside the
+/// binary, by its name. A plugin that stands in no namespace has these alone.
+pub(crate) fn bundled_handlers() -> HashMap<String, String> {
+    let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|d| d.join("handlers")))
+    else {
+        return HashMap::new();
+    };
+    handlers_in(&dir)
+}
+
+/// Each <name>.py directly in dir, by its name.
+pub(crate) fn handlers_in(dir: &std::path::Path) -> HashMap<String, String> {
+    let mut handlers = HashMap::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return handlers;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("py") {
+            continue;
+        }
+        let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(code) => {
+                info!("Handler {} comes with the build: {}", name, path.display());
+                handlers.insert(name.to_string(), code);
+            }
+            Err(e) => warn!("Handler {} beside the binary did not read: {}", path.display(), e),
+        }
+    }
+    handlers
 }
 
 impl Default for PythonPluginService {
@@ -1459,6 +1501,17 @@ impl LlmService for PythonPluginService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A plugin standing in no namespace has the handlers its build carries.
+    #[test]
+    fn the_handlers_a_build_carries_are_read_by_name() {
+        let dir = scratch_dir("bundled");
+        std::fs::write(dir.join("rooms.py"), "@rooms()\ndef held(asked):\n    return {}\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "not a handler").unwrap();
+        let handlers = handlers_in(&dir);
+        assert_eq!(handlers.keys().collect::<Vec<_>>(), vec!["rooms"]);
+        assert!(handlers["rooms"].contains("@rooms()"));
+    }
     use serde::Deserialize;
 
     #[tokio::test]
