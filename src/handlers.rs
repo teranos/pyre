@@ -33,10 +33,10 @@ pub(crate) struct PluginState {
     pub fetch_client: SharedFetchClient,
     /// Dynamically discovered handlers: handler_name -> Python code
     pub discovered_handlers: HashMap<String, String>,
-    /// The @llm function the node's LLM calls go to: (handler, function).
-    /// None when no discovered handler declares one.
+    /// 「[Opus 5.5] The @llm function the node's LLM calls go to: (handler, function).」
+    /// 「[Opus 5.5] None when no discovered handler declares one.」
     pub llm_handler: Option<(String, String)>,
-    /// The @route functions: each route, with the handler that declares it.
+    /// 「[Opus 5.5] The @route functions: each route, with the handler that declares it.」
     pub routes: Vec<(crate::engine::RouteInfo, String)>,
     /// Holds the Sentry client open. None until a DSN arrives in config.
     pub telemetry: Option<sentry::ClientInitGuard>,
