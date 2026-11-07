@@ -16,7 +16,7 @@
         pkgs = import nixpkgs { inherit system; };
 
         outputHashes = {
-          "qntx-ats-0.2.44" = "sha256-bHkfuwmivE29uXjYqABTSNlUNu5hl41cwgnCPLRczbM=";
+          "qntx-ats-0.2.44" = "sha256-PnPMxYNQmtcNN0hGqqh6qf4Fz4EpVez6BHS2Zhzh9G0=";
         };
 
         pyre = pkgs.rustPlatform.buildRustPackage {
