@@ -1,73 +1,185 @@
-name: Nix
-
-on:
-  push:
-    branches: [main]
-  pull_request:
-  # Linux gates every push and pull request. macOS runs weekly and on request:
-  # it is the slowest job in the run, and Linux is what has to work.
-  schedule:
-    - cron: '0 6 * * 1'
-  workflow_dispatch:
-
-jobs:
-  build:
-    strategy:
-      matrix:
-        os: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]') }}
-    runs-on: ${{ matrix.os }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      - name: Install Nix
-        uses: cachix/install-nix-action@v30
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
-      - name: Setup Cachix
-        uses: cachix/cachix-action@v14
-        with:
-          name: qntx
-          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-
-      - name: Build pyre
-        run: nix build --show-trace
-
-      # --include-ignored is what runs DIRE. Those tests reach PyPI, so they
-      # cannot run inside `nix build`'s sandbox, and this step has network.
-      - name: Run tests
-        run: nix develop -c cargo test -- --include-ignored
-
-      # DIRE is pyre wrapped with its own Python environment, the shape every
-      # consumer builds. Building it here is what keeps the example true.
-      - name: Build dire
-        run: nix build --show-trace .#dire
-
-      - name: Push to Cachix
-        run: nix build --print-out-paths --no-link | cachix push qntx
-
-  clippy:
-    strategy:
-      matrix:
-        os: ${{ fromJSON((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && '["ubuntu-latest","macos-latest"]' || '["ubuntu-latest"]') }}
-    runs-on: ${{ matrix.os }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      - name: Install Nix
-        uses: cachix/install-nix-action@v30
-        with:
-          extra_nix_config: |
-            experimental-features = nix-command flakes
-
-      - name: Setup Cachix
-        uses: cachix/cachix-action@v14
-        with:
-          name: qntx
-          authToken: '${{ secrets.CACHIX_AUTH_TOKEN }}'
-
-      - name: Run clippy
-        run: nix build --show-trace .#checks.${{ matrix.os == 'ubuntu-latest' && 'x86_64-linux' || 'aarch64-darwin' }}.clippy
+{
+  "jobs": {
+    "build": {
+      "runs-on": "${{ matrix.os }}",
+      "steps": [
+        {
+          "name": "Checkout repository",
+          "uses": "actions/checkout@v5"
+        },
+        {
+          "name": "Install Nix",
+          "uses": "cachix/install-nix-action@v30",
+          "with": {
+            "extra_nix_config": "experimental-features = nix-command flakes\n"
+          }
+        },
+        {
+          "name": "Setup Cachix",
+          "uses": "cachix/cachix-action@v14",
+          "with": {
+            "authToken": "${{ secrets.CACHIX_AUTH_TOKEN }}",
+            "name": "qntx"
+          }
+        },
+        {
+          "name": "Build pyre",
+          "run": "nix build --show-trace"
+        },
+        {
+          "name": "Run tests",
+          "run": "nix develop -c cargo test -- --include-ignored"
+        },
+        {
+          "name": "Build dire",
+          "run": "nix build --show-trace .#dire"
+        },
+        {
+          "name": "Push to Cachix",
+          "run": "nix build --print-out-paths --no-link | cachix push qntx"
+        }
+      ],
+      "strategy": {
+        "matrix": {
+          "os": [
+            "ubuntu-latest"
+          ]
+        }
+      }
+    },
+    "build-macos": {
+      "if": "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'",
+      "runs-on": "${{ matrix.os }}",
+      "steps": [
+        {
+          "name": "Checkout repository",
+          "uses": "actions/checkout@v5"
+        },
+        {
+          "name": "Install Nix",
+          "uses": "cachix/install-nix-action@v30",
+          "with": {
+            "extra_nix_config": "experimental-features = nix-command flakes\n"
+          }
+        },
+        {
+          "name": "Setup Cachix",
+          "uses": "cachix/cachix-action@v14",
+          "with": {
+            "authToken": "${{ secrets.CACHIX_AUTH_TOKEN }}",
+            "name": "qntx"
+          }
+        },
+        {
+          "name": "Build pyre",
+          "run": "nix build --show-trace"
+        },
+        {
+          "name": "Run tests",
+          "run": "nix develop -c cargo test -- --include-ignored"
+        },
+        {
+          "name": "Build dire",
+          "run": "nix build --show-trace .#dire"
+        },
+        {
+          "name": "Push to Cachix",
+          "run": "nix build --print-out-paths --no-link | cachix push qntx"
+        }
+      ],
+      "strategy": {
+        "matrix": {
+          "os": [
+            "macos-latest"
+          ]
+        }
+      }
+    },
+    "clippy": {
+      "runs-on": "${{ matrix.os }}",
+      "steps": [
+        {
+          "name": "Checkout repository",
+          "uses": "actions/checkout@v5"
+        },
+        {
+          "name": "Install Nix",
+          "uses": "cachix/install-nix-action@v30",
+          "with": {
+            "extra_nix_config": "experimental-features = nix-command flakes\n"
+          }
+        },
+        {
+          "name": "Setup Cachix",
+          "uses": "cachix/cachix-action@v14",
+          "with": {
+            "authToken": "${{ secrets.CACHIX_AUTH_TOKEN }}",
+            "name": "qntx"
+          }
+        },
+        {
+          "name": "Run clippy",
+          "run": "nix build --show-trace .#checks.x86_64-linux.clippy"
+        }
+      ],
+      "strategy": {
+        "matrix": {
+          "os": [
+            "ubuntu-latest"
+          ]
+        }
+      }
+    },
+    "clippy-macos": {
+      "if": "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'",
+      "runs-on": "${{ matrix.os }}",
+      "steps": [
+        {
+          "name": "Checkout repository",
+          "uses": "actions/checkout@v5"
+        },
+        {
+          "name": "Install Nix",
+          "uses": "cachix/install-nix-action@v30",
+          "with": {
+            "extra_nix_config": "experimental-features = nix-command flakes\n"
+          }
+        },
+        {
+          "name": "Setup Cachix",
+          "uses": "cachix/cachix-action@v14",
+          "with": {
+            "authToken": "${{ secrets.CACHIX_AUTH_TOKEN }}",
+            "name": "qntx"
+          }
+        },
+        {
+          "name": "Run clippy",
+          "run": "nix build --show-trace .#checks.aarch64-darwin.clippy"
+        }
+      ],
+      "strategy": {
+        "matrix": {
+          "os": [
+            "macos-latest"
+          ]
+        }
+      }
+    }
+  },
+  "name": "Nix",
+  "on": {
+    "pull_request": {},
+    "push": {
+      "branches": [
+        "main"
+      ]
+    },
+    "schedule": [
+      {
+        "cron": "0 6 * * 1"
+      }
+    ],
+    "workflow_dispatch": {}
+  }
+}
