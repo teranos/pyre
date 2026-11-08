@@ -98,6 +98,36 @@ pub fn build_schema() -> HashMap<String, crate::proto::ConfigFieldSchema> {
         },
     );
 
+    // Not set in a record: the node hands both when it has a DSN of its own.
+    // Naming them is what makes the node hand them (QNTX plugin/grpc).
+    fields.insert(
+        crate::telemetry::DSN_KEY.to_string(),
+        ConfigFieldSchema {
+            r#type: "string".to_string(),
+            description: "Where logs and errors go: the node's Sentry DSN, handed by the node. Empty ships nothing".to_string(),
+            default_value: String::new(),
+            required: false,
+            min: None,
+            max: None,
+            pattern: String::new(),
+            element_type: String::new(),
+        },
+    );
+
+    fields.insert(
+        crate::telemetry::ENVIRONMENT_KEY.to_string(),
+        ConfigFieldSchema {
+            r#type: "string".to_string(),
+            description: "The Sentry environment events are tagged with: the node's, handed by the node".to_string(),
+            default_value: String::new(),
+            required: false,
+            min: None,
+            max: None,
+            pattern: String::new(),
+            element_type: String::new(),
+        },
+    );
+
     fields
 }
 
