@@ -160,8 +160,10 @@ module, and nothing built on top of it is worth debugging first.
 Pyre ships its logs and errors to the Sentry project of the node it runs on.
 The node hands it `sentry_dsn` and `sentry_environment` at Initialize, so
 nothing is set per plugin; both are named in pyre's config schema, which is
-what tells the node to hand them. Without a DSN pyre ships nothing. Each event
-carries the release `<plugin name>@<version>`.
+what tells the node to hand them. Without a DSN pyre ships nothing, and a value
+that is not a DSN fails Initialize saying so. Every runtime thread ships, those
+already running when the DSN arrives included. Each event carries the release
+`<plugin name>@<version>`.
 
 ## Architecture
 
