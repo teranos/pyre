@@ -363,10 +363,10 @@ impl PythonEngine {
         self.extract_triggers(code).map(|t| t.watchers)
     }
 
-    /// What a script's @handler, @watch and @schedule decorators say, read in
-    /// one run of the module. Reading each on its own ran the module once per
-    /// decorator, and twice for @watch, so a script's top-level code ran five
-    /// times through /execute before it ran at all.
+    /// 「[Sonnet 5.5] What a script's @handler, @watch and @schedule decorators say, read in」
+    /// 「[Sonnet 5.5] one run of the module. Reading each on its own ran the module once per」
+    /// 「[Sonnet 5.5] decorator, and twice for @watch, so a script's top-level code ran five」
+    /// 「[Sonnet 5.5] times through /execute before it ran at all.」
     pub fn extract_triggers(&self, code: &str) -> Result<Triggers, String> {
         let preamble = r#"
 _qntx_handler = []
@@ -516,8 +516,8 @@ class schedule:
             || code.contains("@watch")
             || code.contains("@schedule");
 
-        // One run of the module reads all three. A trigger that is named wins
-        // in this order: @handler, then @watch, then @schedule.
+        // 「[Sonnet 5.5] One run of the module reads all three. A trigger that is named wins」
+        // 「[Sonnet 5.5] in this order: @handler, then @watch, then @schedule.」
         let triggers = match self.extract_triggers(code) {
             Ok(triggers) => triggers,
             Err(e) if claims_decorator => return Err(e),
@@ -544,8 +544,8 @@ class schedule:
     /// read, because handlers attested before it cannot be rewritten in place,
     /// and it never carried anything a name does not.
     pub fn extract_handler(&self, code: &str) -> Result<Option<String>, String> {
-        // A failed read stays an Err. Folding it into None would make it read
-        // as a script that marks no handler, with the reason lost.
+        // 「[Sonnet 5.5] A failed read stays an Err. Folding it into None would make it read」
+        // 「[Sonnet 5.5] as a script that marks no handler, with the reason lost.」
         self.extract_triggers(code).map(|t| t.handler)
     }
 
@@ -1278,9 +1278,9 @@ mod tests {
         assert_eq!(b.stdout, "b\n".repeat(20));
     }
 
-    // A script with top-level side effects ran five times through /execute:
-    // once per decorator read, twice for @watch, and then itself. Reading its
-    // decorators is one run, and running it is another.
+    // 「[Sonnet 5.5] A script with top-level side effects ran five times through /execute:」
+    // 「[Sonnet 5.5] once per decorator read, twice for @watch, and then itself. Reading its」
+    // 「[Sonnet 5.5] decorators is one run, and running it is another.」
     #[test]
     fn a_script_run_through_the_door_runs_twice_and_not_five_times() {
         let engine = PythonEngine::new().unwrap();
