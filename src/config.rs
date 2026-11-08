@@ -100,3 +100,21 @@ pub fn build_schema() -> HashMap<String, crate::proto::ConfigFieldSchema> {
 
     fields
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The node hands a plugin the keys its schema names, so pyre names the two
+    /// that bind its Sentry client, as the keys it reads them by.
+    #[test]
+    fn the_schema_names_the_keys_the_node_hands_for_sentry() {
+        let schema = build_schema();
+        for key in [crate::telemetry::DSN_KEY, crate::telemetry::ENVIRONMENT_KEY] {
+            let field = schema
+                .get(key)
+                .unwrap_or_else(|| panic!("the schema does not name {key}"));
+            assert!(!field.required, "{key} must stay optional: no DSN ships nothing");
+        }
+    }
+}

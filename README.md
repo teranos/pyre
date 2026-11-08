@@ -155,6 +155,14 @@ is baked in is pinned; what a handler needs later it asks for at runtime, and
 the plugin keeps running. If the DIRE tests are red, the runtime cannot take a
 module, and nothing built on top of it is worth debugging first.
 
+## Telemetry
+
+Pyre ships its logs and errors to the Sentry project of the node it runs on.
+The node hands it `sentry_dsn` and `sentry_environment` at Initialize, so
+nothing is set per plugin; both are named in pyre's config schema, which is
+what tells the node to hand them. Without a DSN pyre ships nothing. Each event
+carries the release `<plugin name>@<version>`.
+
 ## Architecture
 
 Implements `DomainPluginService` and `PythonService` (see [ADR-022](https://github.com/teranos/QNTX/blob/main/docs/adr/ADR-022-python-as-plugin-provided-service.md)).
