@@ -1320,14 +1320,8 @@ impl PythonPluginService {
         };
 
         // One preparation, shared with the HTTP door, so the same file
-        // behaves the same way whichever way it arrives.
-        let exec_code = {
-            let state = self.handlers.state.read();
-            state
-                .engine
-                .prepared(&script_code)
-                .map_err(Status::internal)?
-        };
+        // behaves the same way whichever way it arrives. Preparing it runs the
+        // module, so it runs where the handler runs, on the blocking pool.
 
         // Execute the Python script with upstream attestation
         let config = ExecutionConfig {
@@ -1351,6 +1345,7 @@ impl PythonPluginService {
             // All of these are thread-local, so they are set on the thread
             // that runs the handler.
             let state = shared.read();
+            let exec_code = state.engine.prepared(&script_code)?;
             crate::atsstore::set_current_handler(Some(handler_name));
             crate::schedulestore::set_current_client(state.schedule_client.clone());
             crate::fetchstore::set_current_client(state.fetch_client.clone());
@@ -1363,9 +1358,10 @@ impl PythonPluginService {
             crate::fetchstore::clear_current_client();
             crate::schedulestore::clear_current_client();
             crate::atsstore::set_current_handler(None);
-            r
+            Ok::<_, String>(r)
         })
-        .await?;
+        .await?
+        .map_err(Status::internal)?;
 
         // Convert execution result to ExecuteJobResponse
         if result.success {
@@ -2320,8 +2316,17 @@ except RuntimeError as e:
 
             let (mut ok, mut failed) = (0, 0);
             for call in calls {
+                // A script that fails comes back as Ok with status 400, so
+                // only a 200 whose body says success is an execution that ran.
                 match call.await {
-                    Ok(Ok(_)) => ok += 1,
+                    Ok(Ok(response))
+                        if response.status_code == 200
+                            && serde_json::from_slice::<serde_json::Value>(&response.body)
+                                .map(|body| body["success"] == true)
+                                .unwrap_or(false) =>
+                    {
+                        ok += 1
+                    }
                     _ => failed += 1,
                 }
             }
