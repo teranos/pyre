@@ -3,7 +3,9 @@
 //! Provides execution capabilities for the PythonEngine.
 
 use crate::atsstore::{self, SharedAtsStoreClient};
-use crate::engine::{Declarations, ExecutionConfig, ExecutionResult, PythonEngine, WatcherInfo};
+use crate::engine::{
+    Declarations, ExecutionConfig, ExecutionResult, PythonEngine, Triggers, WatcherInfo,
+};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 use qntx_grpc::error::Error;
@@ -358,14 +360,25 @@ impl PythonEngine {
     /// to register decorated functions, then collects the watcher metadata.
     /// Returns empty vec if no decorators found or on error.
     pub fn extract_watchers(&self, code: &str) -> Result<Vec<WatcherInfo>, String> {
-        // Python preamble: define @watch decorator that records metadata
-        // Also stub @schedule so scripts using both don't crash
+        self.extract_triggers(code).map(|t| t.watchers)
+    }
+
+    /// What a script's @handler, @watch and @schedule decorators say, read in
+    /// one run of the module. Reading each on its own ran the module once per
+    /// decorator, and twice for @watch, so a script's top-level code ran five
+    /// times through /execute before it ran at all.
+    pub fn extract_triggers(&self, code: &str) -> Result<Triggers, String> {
         let preamble = r#"
+_qntx_handler = []
 _qntx_watchers = []
+_qntx_schedules = []
 
 class handler:
-    def __init__(self, description=None): pass
-    def __call__(self, fn): return fn
+    def __init__(self, description=None):
+        self._description = description
+    def __call__(self, fn):
+        _qntx_handler.append(fn.__name__)
+        return fn
 
 class watch:
     def __init__(self, predicate, context=None):
@@ -381,43 +394,49 @@ class watch:
         return fn
 
 class schedule:
-    def __init__(self, every, description=None): pass
-    def __call__(self, fn): return fn
+    def __init__(self, every, description=None):
+        self._every = every
+        self._description = description
+    def __call__(self, fn):
+        if self._every and self._every > 0:
+            _qntx_schedules.append({
+                'handler_fn': fn.__name__,
+                'every': self._every,
+                'description': self._description or fn.__doc__ or '',
+            })
+        return fn
 "#;
 
-        let full_code = format!("{}\n{}\n{}", preamble, DECLARATION_STUBS, code);
-        let config = ExecutionConfig {
-            capture_variables: true,
-            ..Default::default()
-        };
-        let result = self.execute(&full_code, &config);
-        if !result.success {
-            return Err(extraction_failed("@watch", &result));
-        }
-
-        // Extract _qntx_watchers from the execution result
-        // Re-execute to get the list as JSON
         let extract_code = format!(
-            "{}\n{}\n{}\nimport json\n_result = json.dumps(_qntx_watchers)",
+            "{}\n{}\n{}\nimport json\n_result = json.dumps({{'handler': _qntx_handler, 'watchers': _qntx_watchers, 'schedules': _qntx_schedules}})",
             preamble, DECLARATION_STUBS, code
         );
         let result = self.execute(&extract_code, &ExecutionConfig::default());
         if !result.success {
-            return Err(extraction_failed("@watch", &result));
+            return Err(extraction_failed("@handler, @watch and @schedule", &result));
         }
 
-        let entries: Vec<serde_json::Value> = match result.result {
-            Some(serde_json::Value::String(ref s)) => serde_json::from_str(s)
-                .map_err(|e| format!("failed to parse the @watch extraction result: {e}"))?,
+        let read: serde_json::Value = match result.result {
+            Some(serde_json::Value::String(ref s)) => serde_json::from_str(s).map_err(|e| {
+                format!("failed to parse the @handler, @watch and @schedule extraction result: {e}")
+            })?,
             other => {
                 return Err(format!(
-                    "the @watch extraction returned no usable result: {other:?}"
+                    "the @handler, @watch and @schedule extraction returned no usable result: {other:?}"
                 ))
             }
         };
 
-        Ok(entries
-            .iter()
+        let handler = read["handler"]
+            .as_array()
+            .and_then(|names| names.first())
+            .and_then(|name| name.as_str())
+            .map(String::from);
+
+        let watchers = read["watchers"]
+            .as_array()
+            .into_iter()
+            .flatten()
             .filter_map(|entry| {
                 let handler_fn = entry.get("handler_fn")?.as_str()?;
                 let predicate = entry.get("predicate")?.as_str()?;
@@ -431,7 +450,36 @@ class schedule:
                     contexts: vec![context.to_string()],
                 })
             })
-            .collect())
+            .collect();
+
+        let schedules = read["schedules"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|entry| {
+                let handler_fn = entry.get("handler_fn")?.as_str()?;
+                let every = entry.get("every")?.as_i64()?;
+                if every <= 0 {
+                    return None;
+                }
+                let description = entry
+                    .get("description")
+                    .and_then(|d| d.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                Some(crate::engine::ScheduleMetadata {
+                    handler_fn: handler_fn.to_string(),
+                    interval_seconds: every as i32,
+                    description,
+                })
+            })
+            .collect();
+
+        Ok(Triggers {
+            handler,
+            watchers,
+            schedules,
+        })
     }
 
     /// A script as Python must receive it: decorators stubbed, entry point
@@ -468,29 +516,21 @@ class schedule:
             || code.contains("@watch")
             || code.contains("@schedule");
 
-        match self.extract_handler(code) {
-            Ok(Some(name)) => return Ok(format!("{STUBS}\n{code}\n{name}()")),
-            Ok(None) => {}
+        // One run of the module reads all three. A trigger that is named wins
+        // in this order: @handler, then @watch, then @schedule.
+        let triggers = match self.extract_triggers(code) {
+            Ok(triggers) => triggers,
             Err(e) if claims_decorator => return Err(e),
             Err(_) => return Ok(code.to_string()),
+        };
+        if let Some(name) = triggers.handler {
+            return Ok(format!("{STUBS}\n{code}\n{name}()"));
         }
-        match self.extract_watchers(code) {
-            Ok(ws) => {
-                if let Some(w) = ws.first() {
-                    return Ok(format!("{STUBS}\n{code}\n{}(upstream)", w.handler_fn));
-                }
-            }
-            Err(e) if claims_decorator => return Err(e),
-            Err(_) => return Ok(code.to_string()),
+        if let Some(w) = triggers.watchers.first() {
+            return Ok(format!("{STUBS}\n{code}\n{}(upstream)", w.handler_fn));
         }
-        match self.extract_schedules(code) {
-            Ok(ss) => {
-                if let Some(s) = ss.first() {
-                    return Ok(format!("{STUBS}\n{code}\n{}()", s.handler_fn));
-                }
-            }
-            Err(e) if claims_decorator => return Err(e),
-            Err(_) => return Ok(code.to_string()),
+        if let Some(s) = triggers.schedules.first() {
+            return Ok(format!("{STUBS}\n{code}\n{}()", s.handler_fn));
         }
         // A module that only declares what it serves is read for that
         // elsewhere; run as a script, its decorators still have to resolve.
@@ -504,124 +544,13 @@ class schedule:
     /// read, because handlers attested before it cannot be rewritten in place,
     /// and it never carried anything a name does not.
     pub fn extract_handler(&self, code: &str) -> Result<Option<String>, String> {
-        let preamble = r#"
-_qntx_handler = []
-
-class handler:
-    def __init__(self, description=None):
-        self._description = description
-    def __call__(self, fn):
-        _qntx_handler.append(fn.__name__)
-        return fn
-
-class schedule:
-    def __init__(self, every, description=None): pass
-    def __call__(self, fn): return fn
-
-class watch:
-    def __init__(self, predicate, context=None): pass
-    def __call__(self, fn): return fn
-"#;
-
-        let extract_code = format!(
-            "{}\n{}\n{}\nimport json\n_result = json.dumps(_qntx_handler)",
-            preamble, DECLARATION_STUBS, code
-        );
-        let result = self.execute(&extract_code, &ExecutionConfig::default());
-        if !result.success {
-            // Returning None here would be indistinguishable from "the script
-            // marks no handler", and the reason would be gone — which is how
-            // a NameError reached a user with the cause discarded in here.
-            return Err(format!(
-                "failed to read @handler from the script: {}{}",
-                result.error.unwrap_or_else(|| "no reason given".to_string()),
-                if result.stderr.is_empty() {
-                    String::new()
-                } else {
-                    format!(" ({})", result.stderr.trim())
-                }
-            ));
-        }
-
-        match result.result {
-            Some(serde_json::Value::String(ref s)) => {
-                let names: Vec<String> = serde_json::from_str(s).map_err(|e| {
-                    format!("failed to parse the @handler extraction result: {e}")
-                })?;
-                Ok(names.into_iter().next())
-            }
-            other => Err(format!(
-                "the @handler extraction returned no usable result: {other:?}"
-            )),
-        }
+        // A failed read stays an Err. Folding it into None would make it read
+        // as a script that marks no handler, with the reason lost.
+        self.extract_triggers(code).map(|t| t.handler)
     }
 
     pub fn extract_schedules(&self, code: &str) -> Result<Vec<crate::engine::ScheduleMetadata>, String> {
-        // Also stub @watch so scripts using both don't crash
-        let preamble = r#"
-_qntx_schedules = []
-
-class handler:
-    def __init__(self, description=None): pass
-    def __call__(self, fn): return fn
-
-class schedule:
-    def __init__(self, every, description=None):
-        self._every = every
-        self._description = description
-    def __call__(self, fn):
-        if self._every and self._every > 0:
-            _qntx_schedules.append({
-                'handler_fn': fn.__name__,
-                'every': self._every,
-                'description': self._description or fn.__doc__ or '',
-            })
-        return fn
-
-class watch:
-    def __init__(self, predicate, context=None): pass
-    def __call__(self, fn): return fn
-"#;
-
-        let extract_code = format!(
-            "{}\n{}\n{}\nimport json\n_result = json.dumps(_qntx_schedules)",
-            preamble, DECLARATION_STUBS, code
-        );
-        let result = self.execute(&extract_code, &ExecutionConfig::default());
-        if !result.success {
-            return Err(extraction_failed("@schedule", &result));
-        }
-
-        let entries: Vec<serde_json::Value> = match result.result {
-            Some(serde_json::Value::String(ref s)) => serde_json::from_str(s)
-                .map_err(|e| format!("failed to parse the @schedule extraction result: {e}"))?,
-            other => {
-                return Err(format!(
-                    "the @schedule extraction returned no usable result: {other:?}"
-                ))
-            }
-        };
-
-        Ok(entries
-            .iter()
-            .filter_map(|entry| {
-                let handler_fn = entry.get("handler_fn")?.as_str()?;
-                let every = entry.get("every")?.as_i64()?;
-                if every <= 0 {
-                    return None;
-                }
-                let description = entry
-                    .get("description")
-                    .and_then(|d| d.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                Some(crate::engine::ScheduleMetadata {
-                    handler_fn: handler_fn.to_string(),
-                    interval_seconds: every as i32,
-                    description,
-                })
-            })
-            .collect())
+        self.extract_triggers(code).map(|t| t.schedules)
     }
 
     /// What a script declares it serves: its @llm function and its @route
@@ -1347,6 +1276,38 @@ mod tests {
         assert!(a.success && b.success, "{:?} {:?}", a.error, b.error);
         assert_eq!(a.stdout, "a\n".repeat(20));
         assert_eq!(b.stdout, "b\n".repeat(20));
+    }
+
+    // A script with top-level side effects ran five times through /execute:
+    // once per decorator read, twice for @watch, and then itself. Reading its
+    // decorators is one run, and running it is another.
+    #[test]
+    fn a_script_run_through_the_door_runs_twice_and_not_five_times() {
+        let engine = PythonEngine::new().unwrap();
+        let marker = std::env::temp_dir().join(format!("pyre-runs-{}", std::process::id()));
+        let _ = std::fs::remove_file(&marker);
+        let script = format!("open({:?}, 'a').write('ran\\n')\n", marker.to_string_lossy());
+
+        let prepared = engine.prepared(&script).unwrap();
+        let read = std::fs::read_to_string(&marker).unwrap().lines().count();
+        engine.execute(&prepared, &ExecutionConfig::default());
+        let all = std::fs::read_to_string(&marker).unwrap().lines().count();
+        let _ = std::fs::remove_file(&marker);
+
+        assert_eq!((read, all), (1, 2));
+    }
+
+    #[test]
+    fn one_run_reads_the_handler_the_watchers_and_the_schedules() {
+        let engine = PythonEngine::new().unwrap();
+        let code = "@handler()\ndef a(): pass\n@watch('p', context='c')\ndef b(): pass\n@schedule(every=7)\ndef c(): pass\n";
+        let triggers = engine.extract_triggers(code).unwrap();
+
+        assert_eq!(triggers.handler.as_deref(), Some("a"));
+        assert_eq!(triggers.watchers.len(), 1);
+        assert_eq!(triggers.watchers[0].handler_fn, "b");
+        assert_eq!(triggers.schedules.len(), 1);
+        assert_eq!(triggers.schedules[0].interval_seconds, 7);
     }
 
     #[test]

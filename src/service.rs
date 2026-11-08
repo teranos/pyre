@@ -468,8 +468,8 @@ impl DomainPluginService for PythonPluginService {
                 // and QNTX then pruned every schedule the plugin ever declared.
                 let read = state
                     .engine
-                    .extract_watchers(code)
-                    .and_then(|w| state.engine.extract_schedules(code).map(|s| (w, s)));
+                    .extract_triggers(code)
+                    .map(|t| (t.watchers, t.schedules));
 
                 let (handler_watchers, handler_schedules) = match read {
                     Ok(pair) => pair,
