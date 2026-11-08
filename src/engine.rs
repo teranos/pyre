@@ -13,10 +13,10 @@ use std::sync::Arc;
 /// Default execution timeout in seconds
 pub const DEFAULT_TIMEOUT_SECS: u64 = 30;
 
-/// What a script's trigger decorators say, read in one run of the module.
+/// 「[Sonnet 5.5] What a script's trigger decorators say, read in one run of the module.」
 #[derive(Debug, Clone, PartialEq)]
 pub struct Triggers {
-    /// The function @handler marks, if the script marks one
+    /// 「[Sonnet 5.5] The function @handler marks, if the script marks one」
     pub handler: Option<String>,
     pub watchers: Vec<WatcherInfo>,
     pub schedules: Vec<ScheduleMetadata>,
