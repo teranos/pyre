@@ -45,6 +45,16 @@ pub(crate) struct PluginState {
     pub telemetry: Option<sentry::ClientInitGuard>,
 }
 
+/// Run Python on a thread of the blocking pool. Python holds its thread for as
+/// long as it runs, and a runtime worker held that long cannot answer Health.
+pub(crate) async fn off_the_workers<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, Status> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|e| Status::internal(format!("the execution did not finish: {e}")))
+}
+
 /// Handler context providing access to plugin state
 pub struct HandlerContext {
     pub(crate) state: Arc<RwLock<PluginState>>,
@@ -94,30 +104,34 @@ impl HandlerContext {
             ..Default::default()
         };
 
-        // Set glyph ID for actor convention: attest() defaults actor to "glyph:{id}"
-        if let Some(ref glyph_id) = req.glyph_id {
-            crate::atsstore::set_current_glyph_id(Some(glyph_id.clone()));
-        }
+        let shared = self.state.clone();
+        let result = off_the_workers(move || {
+            // Set glyph ID for actor convention: attest() defaults actor to
+            // "glyph:{id}". It is thread-local, so it is set on the thread
+            // that runs the code.
+            if let Some(ref glyph_id) = req.glyph_id {
+                crate::atsstore::set_current_glyph_id(Some(glyph_id.clone()));
+            }
 
-        let result = {
-            let state = self.state.read();
+            let state = shared.read();
             // A decorated script needs its decorators defined before it runs.
             // Without this the gRPC path prepared them and this one did not,
             // and the same file behaved differently depending on the door.
-            let content = state
-                .engine
-                .prepared(&req.content)
-                .map_err(Status::internal)?;
-            state.engine.execute_with_ats(
-                &content,
-                &config,
-                Some(state.ats_client.clone()),
-                req.upstream_attestation.as_ref(),
-            )
-        };
+            let result = state.engine.prepared(&req.content).map(|content| {
+                state.engine.execute_with_ats(
+                    &content,
+                    &config,
+                    Some(state.ats_client.clone()),
+                    req.upstream_attestation.as_ref(),
+                )
+            });
 
-        // Clear glyph ID after execution
-        crate::atsstore::set_current_glyph_id(None);
+            // Clear glyph ID after execution
+            crate::atsstore::set_current_glyph_id(None);
+            result
+        })
+        .await?
+        .map_err(Status::internal)?;
 
         execution_result_to_response(result).map_err(|e| *e)
     }
@@ -136,12 +150,14 @@ impl HandlerContext {
             return Err(Status::invalid_argument("Missing 'expr' field"));
         }
 
-        let result = {
-            let state = self.state.read();
+        let shared = self.state.clone();
+        let result = off_the_workers(move || {
+            let state = shared.read();
             state
                 .engine
                 .evaluate_with_ats(&req.expr, Some(state.ats_client.clone()))
-        };
+        })
+        .await?;
 
         execution_result_to_response(result).map_err(|e| *e)
     }
@@ -173,12 +189,14 @@ impl HandlerContext {
             ..Default::default()
         };
 
-        let result = {
-            let state = self.state.read();
+        let shared = self.state.clone();
+        let result = off_the_workers(move || {
+            let state = shared.read();
             state
                 .engine
                 .execute_file_with_ats(&req.path, &config, Some(state.ats_client.clone()))
-        };
+        })
+        .await?;
 
         execution_result_to_response(result).map_err(|e| *e)
     }
@@ -200,10 +218,8 @@ impl HandlerContext {
             return Err(Status::invalid_argument("Missing 'package' field"));
         }
 
-        let result = {
-            let state = self.state.read();
-            state.engine.pip_install(&req.package)
-        };
+        let shared = self.state.clone();
+        let result = off_the_workers(move || shared.read().engine.pip_install(&req.package)).await?;
 
         execution_result_to_response(result).map_err(|e| *e)
     }
