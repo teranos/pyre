@@ -45,8 +45,8 @@ pub(crate) struct PluginState {
     pub telemetry: Option<sentry::ClientInitGuard>,
 }
 
-/// Run Python on a thread of the blocking pool. Python holds its thread for as
-/// long as it runs, and a runtime worker held that long cannot answer Health.
+/// 「[Sonnet 5.5] Run Python on a thread of the blocking pool. Python holds its thread for as」
+/// 「[Sonnet 5.5] long as it runs, and a runtime worker held that long cannot answer Health.」
 pub(crate) async fn off_the_workers<T: Send + 'static>(
     work: impl FnOnce() -> T + Send + 'static,
 ) -> Result<T, Status> {
@@ -106,9 +106,9 @@ impl HandlerContext {
 
         let shared = self.state.clone();
         let result = off_the_workers(move || {
-            // Set glyph ID for actor convention: attest() defaults actor to
-            // "glyph:{id}". It is thread-local, so it is set on the thread
-            // that runs the code.
+            // 「[Sonnet 5.5] Set glyph ID for actor convention: attest() defaults actor to」
+            // 「[Sonnet 5.5] "glyph:{id}". It is thread-local, so it is set on the thread」
+            // 「[Sonnet 5.5] that runs the code.」
             if let Some(ref glyph_id) = req.glyph_id {
                 crate::atsstore::set_current_glyph_id(Some(glyph_id.clone()));
             }
@@ -126,7 +126,7 @@ impl HandlerContext {
                 )
             });
 
-            // Clear glyph ID after execution
+            // 「[Sonnet 5.5] Clear glyph ID after execution」
             crate::atsstore::set_current_glyph_id(None);
             result
         })
