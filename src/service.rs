@@ -331,7 +331,10 @@ impl DomainPluginService for PythonPluginService {
             // guard drops with the assignment and closes its pipe.
             if let Some(dsn) = req.config.get(crate::telemetry::DSN_KEY).filter(|d| !d.is_empty()) {
                 let environment = req.config.get(crate::telemetry::ENVIRONMENT_KEY).map(String::as_str);
-                state.telemetry = Some(crate::telemetry::bind(&self.name, dsn, environment));
+                state.telemetry = Some(
+                    crate::telemetry::bind(&self.name, dsn, environment)
+                        .map_err(Status::invalid_argument)?,
+                );
             }
 
             // Store configuration

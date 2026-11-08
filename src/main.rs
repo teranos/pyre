@@ -45,8 +45,17 @@ struct Args {
 /// Max port retries when the requested port is occupied (multi-session conflicts).
 const MAX_PORT_RETRIES: u16 = 10;
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Every thread the runtime starts hands its Sentry hub to telemetry, so the
+    // client that arrives at Initialize reaches all of them.
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .on_thread_start(pyre::telemetry::adopt_thread)
+        .build()?
+        .block_on(run())
+}
+
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     // Set up panic hook to log panics before they terminate the process
     std::panic::set_hook(Box::new(|panic_info| {
         eprintln!("PANIC: Plugin panicked during startup or execution");
