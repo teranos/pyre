@@ -792,8 +792,8 @@ impl PythonService for PythonPluginService {
 
         let shared = self.handlers.state.clone();
         let result = crate::handlers::off_the_workers(move || {
-            // Set element ID for actor convention. It is thread-local, so it
-            // is set on the thread that runs the code.
+            // 「[Sonnet 5.5] Set element ID for actor convention. It is thread-local, so it」
+            // 「[Sonnet 5.5] is set on the thread that runs the code.」
             if !req.element_id.is_empty() {
                 crate::atsstore::set_current_glyph_id(Some(req.element_id.clone()));
             }
@@ -1320,8 +1320,8 @@ impl PythonPluginService {
         };
 
         // One preparation, shared with the HTTP door, so the same file
-        // behaves the same way whichever way it arrives. Preparing it runs the
-        // module, so it runs where the handler runs, on the blocking pool.
+        // 「[Sonnet 5.5] behaves the same way whichever way it arrives. Preparing it runs the」
+        // 「[Sonnet 5.5] module, so it runs where the handler runs, on the blocking pool.」
 
         // Execute the Python script with upstream attestation
         let config = ExecutionConfig {
@@ -1342,8 +1342,8 @@ impl PythonPluginService {
         let shared = self.handlers.state.clone();
         let handler_name = handler_key.to_string();
         let result = crate::handlers::off_the_workers(move || {
-            // All of these are thread-local, so they are set on the thread
-            // that runs the handler.
+            // 「[Sonnet 5.5] All of these are thread-local, so they are set on the thread」
+            // 「[Sonnet 5.5] that runs the handler.」
             let state = shared.read();
             let exec_code = state.engine.prepared(&script_code)?;
             crate::atsstore::set_current_handler(Some(handler_name));
@@ -2135,9 +2135,9 @@ except RuntimeError as e:
     #[tokio::test]
     async fn a_handler_supplies_the_context_its_code_never_passed() {
         let service = PythonPluginService::new("pyre").unwrap();
-        // The name is thread-local, so it is set on the thread that runs the
-        // code, as execute_discovered_handler_job does. The HTTP door runs on
-        // a thread of its own and would not see it.
+        // 「[Sonnet 5.5] The name is thread-local, so it is set on the thread that runs the」
+        // 「[Sonnet 5.5] code, as execute_discovered_handler_job does. The HTTP door runs on」
+        // 「[Sonnet 5.5] a thread of its own and would not see it.」
         atsstore::set_current_handler(Some("mp004_request_ad_renders".to_string()));
 
         let code = r#"
@@ -2251,12 +2251,12 @@ except RuntimeError as e:
         assert!(response.stdout.contains("Got expected error"));
     }
 
-    // Ramps concurrent /execute calls until Health stops answering in time, and
-    // prints one line per level so the break is observed rather than guessed.
-    // The runtime is multi-threaded and sized as `#[tokio::main]` sizes the
-    // plugin: one worker per core. Each call holds the GIL for
-    // PYRE_STRESS_HOLD_MS (default 1000), which is what a busy handler does.
-    // The bound is PYRE_STRESS_HEALTH_MS (default 2000).
+    // 「[Sonnet 5.5] Ramps concurrent /execute calls until Health stops answering in time, and」
+    // 「[Sonnet 5.5] prints one line per level so the break is observed rather than guessed.」
+    // 「[Sonnet 5.5] The runtime is multi-threaded and sized as `#[tokio::main]` sizes the」
+    // 「[Sonnet 5.5] plugin: one worker per core. Each call holds the GIL for」
+    // 「[Sonnet 5.5] PYRE_STRESS_HOLD_MS (default 1000), which is what a busy handler does.」
+    // 「[Sonnet 5.5] The bound is PYRE_STRESS_HEALTH_MS (default 2000).」
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "pushes the runtime until it fails; run on purpose"]
     async fn health_keeps_answering_as_executions_pile_up() {
@@ -2316,8 +2316,8 @@ except RuntimeError as e:
 
             let (mut ok, mut failed) = (0, 0);
             for call in calls {
-                // A script that fails comes back as Ok with status 400, so
-                // only a 200 whose body says success is an execution that ran.
+                // 「[Sonnet 5.5] A script that fails comes back as Ok with status 400, so」
+                // 「[Sonnet 5.5] only a 200 whose body says success is an execution that ran.」
                 match call.await {
                     Ok(Ok(response))
                         if response.status_code == 200
